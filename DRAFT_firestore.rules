@@ -1,0 +1,221 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Global default-deny safety net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Primitive helpers
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerified() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isValidCity(city) {
+      return city is string &&
+        city.size() >= 2 &&
+        city.size() <= 60 &&
+        city.matches('^[a-zA-Z ]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isAdmin() {
+      return isVerified() && (
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid)) ||
+        request.auth.token.email == 'annanyabagga01@gmail.com'
+      );
+    }
+
+    function isValidActionType(val) {
+      return val in [
+        'metro_commute',
+        'carpool',
+        'no_burning',
+        'hepa_maintenance',
+        'energy_saving',
+        'bus_commute'
+      ];
+    }
+
+    function isValidCo2ForAction(actionType, co2AvoidedKg) {
+      return co2AvoidedKg is number &&
+        co2AvoidedKg >= 0 &&
+        co2AvoidedKg <= 500 &&
+        (
+          (actionType in ['no_burning', 'hepa_maintenance'] && co2AvoidedKg == 0) ||
+          (actionType in ['metro_commute', 'bus_commute', 'carpool', 'energy_saving'] && co2AvoidedKg > 0)
+        );
+    }
+
+    function isValidContribution(data) {
+      return data.keys().hasAll([
+          'authorUid',
+          'anonymousHandle',
+          'city',
+          'actionType',
+          'co2AvoidedKg',
+          'optInPublic',
+          'createdAt'
+        ]) &&
+        data.keys().hasOnly([
+          'authorUid',
+          'anonymousHandle',
+          'city',
+          'actionType',
+          'co2AvoidedKg',
+          'note',
+          'challengeId',
+          'optInPublic',
+          'createdAt'
+        ]) &&
+        data.authorUid is string &&
+        data.authorUid.size() >= 1 &&
+        data.authorUid.size() <= 128 &&
+        data.authorUid.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.anonymousHandle is string &&
+        data.anonymousHandle.size() >= 2 &&
+        data.anonymousHandle.size() <= 40 &&
+        data.anonymousHandle.matches('^[a-zA-Z0-9_\\- ]+$') &&
+        isValidCity(data.city) &&
+        isValidActionType(data.actionType) &&
+        isValidCo2ForAction(data.actionType, data.co2AvoidedKg) &&
+        data.optInPublic is bool &&
+        data.optInPublic == true &&
+        (!('note' in data) || (data.note is string && data.note.size() <= 240)) &&
+        (!('challengeId' in data) || (data.challengeId is string && data.challengeId.size() <= 64 && data.challengeId.matches('^[a-zA-Z0-9_\\-]*$'))) &&
+        data.createdAt is timestamp;
+    }
+
+    function isValidChallenge(data) {
+      return data.keys().hasAll([
+          'title',
+          'description',
+          'cityScope',
+          'targetActions',
+          'isActive',
+          'createdAt'
+        ]) &&
+        data.keys().hasOnly([
+          'title',
+          'description',
+          'cityScope',
+          'targetActions',
+          'isActive',
+          'createdAt'
+        ]) &&
+        data.title is string &&
+        data.title.size() >= 3 &&
+        data.title.size() <= 100 &&
+        data.description is string &&
+        data.description.size() >= 10 &&
+        data.description.size() <= 360 &&
+        data.cityScope is string &&
+        data.cityScope.size() >= 2 &&
+        data.cityScope.size() <= 60 &&
+        data.targetActions is number &&
+        data.targetActions >= 1 &&
+        data.targetActions <= 1000000 &&
+        data.isActive is bool &&
+        data.createdAt is timestamp;
+    }
+
+    function isValidParticipant(data) {
+      return data.keys().hasAll([
+          'challengeId',
+          'userId',
+          'city',
+          'optInPublic',
+          'joinedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'challengeId',
+          'userId',
+          'city',
+          'optInPublic',
+          'joinedAt'
+        ]) &&
+        data.challengeId is string &&
+        data.challengeId.size() >= 2 &&
+        data.challengeId.size() <= 64 &&
+        data.challengeId.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.userId is string &&
+        data.userId.size() >= 1 &&
+        data.userId.size() <= 128 &&
+        data.userId.matches('^[a-zA-Z0-9_\\-]+$') &&
+        isValidCity(data.city) &&
+        data.optInPublic is bool &&
+        data.optInPublic == true &&
+        data.joinedAt is timestamp;
+    }
+
+    // Startup connection check document
+    match /test/connection {
+      allow get: if true;
+      allow list, write: if false;
+    }
+
+    // Admin lookup records (read own document only; managed out-of-band)
+    match /admins/{adminId} {
+      allow get: if isSignedIn() && isValidId(adminId) && request.auth.uid == adminId;
+      allow list, write: if false;
+    }
+
+    // Opt-in anonymous community contributions
+    match /community_contributions/{contributionId} {
+      allow get: if isSignedIn() && isValidId(contributionId) && (existing().optInPublic == true || existing().authorUid == request.auth.uid);
+      allow list: if isSignedIn() && existing().optInPublic == true;
+      allow create: if isVerified() &&
+        isValidId(contributionId) &&
+        isValidContribution(incoming()) &&
+        incoming().authorUid == request.auth.uid &&
+        incoming().createdAt == request.time;
+      allow update: if false;
+      allow delete: if isSignedIn() && isValidId(contributionId) && (existing().authorUid == request.auth.uid || isAdmin());
+    }
+
+    // Community challenges
+    match /community_challenges/{challengeId} {
+      allow get: if isSignedIn() && isValidId(challengeId) && (existing().isActive == true || isAdmin());
+      allow list: if isSignedIn() && existing().isActive == true;
+      allow create: if isAdmin() &&
+        isValidId(challengeId) &&
+        isValidChallenge(incoming()) &&
+        incoming().createdAt == request.time;
+      allow update: if isAdmin() &&
+        isValidId(challengeId) &&
+        isValidChallenge(incoming()) &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['title', 'description', 'cityScope', 'targetActions', 'isActive']);
+      allow delete: if isAdmin() && isValidId(challengeId);
+    }
+
+    // Challenge participation records
+    match /challenge_participants/{participantId} {
+      allow get: if isSignedIn() && isValidId(participantId) && (existing().userId == request.auth.uid || existing().optInPublic == true);
+      allow list: if isSignedIn() && existing().optInPublic == true;
+      allow create: if isVerified() &&
+        isValidId(participantId) &&
+        isValidParticipant(incoming()) &&
+        incoming().userId == request.auth.uid &&
+        incoming().joinedAt == request.time;
+      allow update: if false;
+      allow delete: if isSignedIn() && isValidId(participantId) && (existing().userId == request.auth.uid || isAdmin());
+    }
+  }
+}

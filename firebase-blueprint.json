@@ -1,0 +1,170 @@
+{
+  "entities": {
+    "CommunityContribution": {
+      "title": "CommunityContribution",
+      "description": "Opt-in anonymous community eco-action contribution with no PII.",
+      "type": "object",
+      "properties": {
+        "authorUid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Firebase Auth UID of the contributor."
+        },
+        "anonymousHandle": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 40,
+          "pattern": "^[a-zA-Z0-9_\\- ]+$",
+          "description": "User-chosen anonymous alias (never real email or PII)."
+        },
+        "city": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 60,
+          "pattern": "^[a-zA-Z ]+$",
+          "description": "Indian city name only (no precise coordinates or street addresses)."
+        },
+        "actionType": {
+          "type": "string",
+          "enum": [
+            "metro_commute",
+            "carpool",
+            "no_burning",
+            "hepa_maintenance",
+            "energy_saving",
+            "bus_commute"
+          ],
+          "description": "Verified sustainable action category."
+        },
+        "co2AvoidedKg": {
+          "type": "number",
+          "description": "Estimated CO2e avoided in kilograms (0 for qualitative-only actions; > 0 to 500 for quantified actions)."
+        },
+        "note": {
+          "type": "string",
+          "maxLength": 240,
+          "description": "Optional non-PII short note."
+        },
+        "challengeId": {
+          "type": "string",
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]*$",
+          "description": "Optional challenge identifier."
+        },
+        "optInPublic": {
+          "type": "boolean",
+          "description": "Explicit user opt-in to display in anonymous community aggregate."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of contribution creation."
+        }
+      },
+      "required": [
+        "authorUid",
+        "anonymousHandle",
+        "city",
+        "actionType",
+        "co2AvoidedKg",
+        "optInPublic",
+        "createdAt"
+      ]
+    },
+    "CommunityChallenge": {
+      "title": "CommunityChallenge",
+      "description": "Active city or regional clean-habit community challenge.",
+      "type": "object",
+      "properties": {
+        "title": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 100
+        },
+        "description": {
+          "type": "string",
+          "minLength": 10,
+          "maxLength": 360
+        },
+        "cityScope": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 60
+        },
+        "targetActions": {
+          "type": "number"
+        },
+        "isActive": {
+          "type": "boolean"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "title",
+        "description",
+        "cityScope",
+        "targetActions",
+        "isActive",
+        "createdAt"
+      ]
+    },
+    "ChallengeParticipant": {
+      "title": "ChallengeParticipant",
+      "description": "Opt-in anonymous challenge enrollment.",
+      "type": "object",
+      "properties": {
+        "challengeId": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "userId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "city": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 60,
+          "pattern": "^[a-zA-Z ]+$"
+        },
+        "optInPublic": {
+          "type": "boolean"
+        },
+        "joinedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "challengeId",
+        "userId",
+        "city",
+        "optInPublic",
+        "joinedAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/community_contributions/{contributionId}": {
+      "schema": { "$ref": "#/entities/CommunityContribution" },
+      "description": "Opt-in anonymous community eco-action entries."
+    },
+    "/community_challenges/{challengeId}": {
+      "schema": { "$ref": "#/entities/CommunityChallenge" },
+      "description": "Community challenge definitions."
+    },
+    "/challenge_participants/{participantId}": {
+      "schema": { "$ref": "#/entities/ChallengeParticipant" },
+      "description": "Anonymous challenge participation records."
+    }
+  }
+}

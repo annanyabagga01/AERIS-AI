@@ -1,0 +1,6 @@
+{
+  "name": "AERIS AI",
+  "description": "Breathe Smarter. Live Better. GenAI-powered urban air quality and winter smog assistant for Indian families and communities.",
+  "requestFramePermissions": ["geolocation"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
