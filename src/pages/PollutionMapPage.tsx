@@ -21,6 +21,7 @@ import type {
   MapBasemapMode,
 } from '../components/IndiaStationMap.tsx';
 import { MapSkeleton } from '../components/SkeletonCards.tsx';
+import { buildApiUrl } from '../lib/apiClient.ts';
 import {
   SIMULATION_BADGE_TEXT,
   SIMULATION_DATA_SOURCE,
@@ -98,7 +99,9 @@ export function PollutionMapPage({
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch('/api/india/aqi', { signal: controller.signal });
+      const res = await fetch(buildApiUrl('/api/india/aqi'), {
+        signal: controller.signal,
+      });
       if (!res.ok) {
         let serverError = `HTTP ${res.status}`;
         try {

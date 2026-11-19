@@ -12,6 +12,7 @@ import {
   Server,
   ShieldCheck,
 } from 'lucide-react';
+import { buildApiUrl } from '../lib/apiClient.ts';
 import { classifyCpcbAqi, findNearestSupportedCity } from '../lib/aqi.ts';
 import {
   containsSensitivePiiOrLocation,
@@ -188,7 +189,7 @@ export function SettingsPage({
     setHealthLoading(true);
     setHealthError(null);
     try {
-      const res = await fetch('/api/health');
+      const res = await fetch(buildApiUrl('/api/health'));
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       setHealth((await res.json()) as HealthStatus);
     } catch (err) {
@@ -209,7 +210,7 @@ export function SettingsPage({
     setCitySimLoading(true);
     try {
       const res = await fetch(
-        `/api/india/aqi?city=${encodeURIComponent(cityName)}`
+        buildApiUrl(`/api/india/aqi?city=${encodeURIComponent(cityName)}`)
       );
       if (!res.ok) return;
       const json = (await res.json()) as IndiaAqiApiResponse;
@@ -285,7 +286,7 @@ export function SettingsPage({
     async (gpsFailure: GpsFailureCategory, gpsReasonText: string) => {
       setGpsStatusNote(gpsReasonText);
       try {
-        const res = await fetch('/api/location/approximate', {
+        const res = await fetch(buildApiUrl('/api/location/approximate'), {
           cache: 'no-store',
         });
         if (res.ok) {

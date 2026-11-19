@@ -95,8 +95,16 @@ async function startServer() {
           !process.env.VITE_FIREBASE_API_KEY.trim().startsWith('YOUR_')
       );
     res.json({
+      success: true,
       status: 'ok',
       timestampIso: new Date().toISOString(),
+      endpoints: [
+        '/api/health',
+        '/api/india/aqi',
+        '/api/aqi',
+        '/api/location/approximate',
+        '/api/community/demo',
+      ],
       integrations: {
         geminiConfigured: isGeminiConfigured(),
         firebaseConfigured: firebaseConfigExists,
@@ -153,6 +161,11 @@ async function startServer() {
         typeof req.query.city === 'string'
           ? req.query.city.trim().slice(0, 80)
           : undefined;
+      const station =
+        typeof req.query.station === 'string' &&
+        req.query.station.trim().length > 0
+          ? req.query.station.trim().slice(0, 120)
+          : undefined;
       const category =
         typeof req.query.category === 'string'
           ? req.query.category.trim().slice(0, 32)
@@ -161,6 +174,9 @@ async function startServer() {
         typeof req.query.search === 'string'
           ? req.query.search.trim().slice(0, 100)
           : undefined;
+      const includeCityDetail =
+        req.query.includeCityDetail === '1' ||
+        req.query.includeCityDetail === 'true';
 
       const payload = queryIndiaSimulatedApi({
         state,
@@ -169,9 +185,31 @@ async function startServer() {
         search,
         intervalMs: SIMULATION_INTERVAL_MS,
       });
+
+      if (includeCityDetail) {
+        const cityTarget = city || 'Delhi';
+        const cityDetail =
+          buildSimulatedCityAqiResponse(cityTarget, classifyCpcbAqi, {
+            station,
+            intervalMs: SIMULATION_INTERVAL_MS,
+          }) ?? undefined;
+        if (!cityDetail) {
+          res.status(404).json({
+            success: false,
+            error: `City "${cityTarget}" is not in the AERIS AI simulated Indian city catalog.`,
+            data_type: SIMULATION_DATA_TYPE,
+            data_source: SIMULATION_DATA_SOURCE,
+            supportedCities: INDIAN_CITIES.map((c) => c.name),
+          });
+          return;
+        }
+        payload.cityDetail = cityDetail;
+      }
+
       res.json(payload);
     } catch (err) {
       res.status(500).json({
+        success: false,
         error: redactSecrets(
           err instanceof Error
             ? err.message
@@ -194,16 +232,25 @@ async function startServer() {
           : undefined;
 
       const data = resolveSimulatedCityAqi(city, { station });
-      res.json(data);
+      res.json({
+        success: true,
+        data_type: SIMULATION_DATA_TYPE,
+        data_source: SIMULATION_DATA_SOURCE,
+        generated_at: data.lastUpdatedIso,
+        total_stations: data.stations.length,
+        ...data,
+      });
     } catch (err) {
       if (err instanceof UnsupportedCityError) {
         res.status(404).json({
+          success: false,
           error: err.message,
           supportedCities: err.supportedCities,
         });
         return;
       }
       res.status(500).json({
+        success: false,
         error: redactSecrets(
           err instanceof Error
             ? err.message
@@ -339,6 +386,7 @@ async function startServer() {
   // 6. Demo Community dataset (used when signed-out / Firebase opt-in inactive)
   app.get('/api/community/demo', (_req, res) => {
     res.json({
+      success: true,
       isDemo: true,
       disclaimer:
         'Demo Community Reference Data. Sign in with Google and opt in to submit and view live anonymous Firestore community actions.',
@@ -347,11 +395,33 @@ async function startServer() {
     });
   });
 
+  // Explicit JSON 404 handler for any unregistered /api/* route (never fall through to HTML)
+  app.use('/api', (req, res) => {
+    res.status(404).json({
+      success: false,
+      error: `API route not found: ${req.method} ${req.originalUrl}`,
+      availableEndpoints: [
+        'GET /api/health',
+        'GET /api/india/aqi',
+        'GET /api/aqi',
+        'GET /api/location/approximate',
+        'GET /api/community/demo',
+        'POST /api/ai/chat',
+        'POST /api/ai/recommendations',
+        'POST /api/impact/calculate',
+      ],
+    });
+  });
+
   // Mount Vite in dev or serve built assets in production
   if (process.env.NODE_ENV === 'production') {
     const distDir = path.join(__dirname, 'dist');
     app.use(express.static(distDir));
-    app.get('/{*splat}', (_req, res) => {
+    app.use((req, res, next) => {
+      if (req.method !== 'GET') {
+        next();
+        return;
+      }
       res.sendFile(path.join(distDir, 'index.html'));
     });
   } else {

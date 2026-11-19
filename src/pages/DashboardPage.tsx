@@ -27,6 +27,7 @@ import { AqiStatusText } from '../components/AqiBadge.tsx';
 import { CpcbHealthEnginePanel } from '../components/CpcbHealthEnginePanel.tsx';
 import { EarthScene } from '../components/EarthScene.tsx';
 import { DashboardSkeleton } from '../components/SkeletonCards.tsx';
+import { buildApiUrl } from '../lib/apiClient.ts';
 import {
   classifyCpcbAqi,
   formatFreshnessLabel,
@@ -130,9 +131,16 @@ export function DashboardPage({
     setIndiaLoading(true);
     setIndiaError(null);
     try {
-      const res = await fetch('/api/india/aqi');
+      const res = await fetch(buildApiUrl('/api/india/aqi'));
       if (!res.ok) {
-        throw new Error(`HTTP ${res.status}`);
+        let serverMsg = `HTTP ${res.status}`;
+        try {
+          const errBody = (await res.json()) as { error?: string };
+          if (errBody?.error) serverMsg = errBody.error;
+        } catch {
+          // keep HTTP status fallback
+        }
+        throw new Error(serverMsg);
       }
       const json = (await res.json()) as IndiaAqiApiResponse;
       setIndiaSummary(json.summary ?? null);

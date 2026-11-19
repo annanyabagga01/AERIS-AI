@@ -39,6 +39,15 @@ export default defineConfig(() => {
       hmr: process.env.DISABLE_HMR !== 'true',
       // Disable file watching when DISABLE_HMR is true to save CPU during agent edits.
       watch: process.env.DISABLE_HMR === 'true' ? null : {},
+      // Proxies /api requests when running standalone `vite` (Express handles /api directly in `tsx server.ts`).
+      proxy: process.env.VITE_API_PROXY_TARGET
+        ? {
+            '/api': {
+              target: process.env.VITE_API_PROXY_TARGET,
+              changeOrigin: true,
+            },
+          }
+        : undefined,
     },
   };
 });

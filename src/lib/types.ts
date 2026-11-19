@@ -124,6 +124,11 @@ export interface IndiaAqiSummary {
 }
 
 export interface IndiaAqiApiResponse {
+  success: true;
+  data_type: 'SIMULATED';
+  data_source: 'AERIS AI Simulation Engine';
+  generated_at: string;
+  total_stations: number;
   stations: SimulatedIndiaStation[];
   summary: IndiaAqiSummary;
   states: { name: string; code: string; isUnionTerritory: boolean }[];
@@ -137,6 +142,7 @@ export interface IndiaAqiApiResponse {
     intervalMs: number;
     totalUnfilteredStations: number;
   };
+  cityDetail?: CityAqiResponse;
 }
 
 export interface AqiTrendPoint {

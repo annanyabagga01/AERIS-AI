@@ -140,6 +140,11 @@ test('produces consistent deterministic readings within an interval and updates 
 test('supports state, city, category, and search query filters and accurate summary math', () => {
   const nowMs = Date.parse('2026-11-19T06:00:00Z');
   const full = queryIndiaSimulatedApi({ nowMs });
+  assert.equal(full.success, true);
+  assert.equal(full.data_type, 'SIMULATED');
+  assert.equal(full.data_source, 'AERIS AI Simulation Engine');
+  assert.equal(full.generated_at, full.summary.generatedAt);
+  assert.equal(full.total_stations, full.stations.length);
   const sumDistribution = full.summary.categoryDistribution.reduce(
     (acc, item) => acc + item.count,
     0
@@ -150,6 +155,8 @@ test('supports state, city, category, and search query filters and accurate summ
   assert.ok(full.summary.lowestStation.aqi <= full.summary.averageAqi);
 
   const kerala = queryIndiaSimulatedApi({ state: 'Kerala', nowMs });
+  assert.equal(kerala.success, true);
+  assert.equal(kerala.total_stations, kerala.stations.length);
   assert.ok(kerala.stations.length >= 3);
   assert.ok(kerala.stations.every((s) => s.state === 'Kerala' && s.state_code === 'KL'));
 
@@ -157,7 +164,7 @@ test('supports state, city, category, and search query filters and accurate summ
   assert.equal(byStateCode.stations.length, 1);
   assert.equal(byStateCode.stations[0].city, 'Port Blair');
 
-  const kochiResponse = buildSimulatedCityAqiResponse('Kochi', classifyCpcbAqi, { nowMs });
+  const kochiResponse = buildSimulatedCityAqiResponse('Kochi, Kerala', classifyCpcbAqi, { nowMs });
   assert.ok(kochiResponse);
   assert.equal(kochiResponse.city, 'Kochi');
   assert.equal(kochiResponse.state, 'Kerala');
@@ -165,4 +172,8 @@ test('supports state, city, category, and search query filters and accurate summ
   assert.equal(kochiResponse.dataType, SIMULATION_DATA_TYPE);
   assert.equal(kochiResponse.hasOfficialData, false);
   assert.equal(kochiResponse.trend24h.length, 8);
+
+  const aliasResponse = buildSimulatedCityAqiResponse('Bombay', classifyCpcbAqi, { nowMs });
+  assert.ok(aliasResponse);
+  assert.equal(aliasResponse.city, 'Mumbai');
 });

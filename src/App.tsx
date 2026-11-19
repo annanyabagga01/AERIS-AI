@@ -15,6 +15,7 @@ import {
 } from 'lucide-react';
 import { AnimatePresence, motion } from 'motion/react';
 import { ErrorBoundary } from './components/ErrorBoundary.tsx';
+import { buildApiUrl } from './lib/apiClient.ts';
 import { classifyCpcbAqi } from './lib/aqi.ts';
 import {
   loadImpactLog,
@@ -26,6 +27,7 @@ import type {
   CityAqiResponse,
   FamilyPreferences,
   ImpactLogEntry,
+  IndiaAqiApiResponse,
 } from './lib/types.ts';
 import { AiAssistantPage } from './pages/AiAssistantPage.tsx';
 import { CommunityHubPage } from './pages/CommunityHubPage.tsx';
@@ -222,18 +224,21 @@ function AerisShell() {
         prev && prev.city.toLowerCase() !== cityName.toLowerCase() ? null : prev
       );
       try {
-        const params = new URLSearchParams({ city: cityName });
+        const params = new URLSearchParams({
+          city: cityName,
+          includeCityDetail: '1',
+        });
         if (stationId && stationId !== 'all') {
           params.set('station', stationId);
         }
         if (forceRefresh) {
           params.set('refresh', '1');
         }
-        const res = await fetch(`/api/aqi?${params.toString()}`, {
+        const res = await fetch(buildApiUrl(`/api/india/aqi?${params.toString()}`), {
           signal: controller.signal,
         });
         if (!res.ok) {
-          let detail = `Air quality service returned HTTP ${res.status}`;
+          let detail = `Air quality service returned HTTP ${res.status} for GET /api/india/aqi.`;
           try {
             const errJson = (await res.json()) as { error?: string };
             if (errJson.error) detail = errJson.error;
@@ -242,9 +247,28 @@ function AerisShell() {
           }
           throw new Error(detail);
         }
-        const json = (await res.json()) as CityAqiResponse;
-        if (seq === aqiSeqRef.current) {
-          setAqiData(json);
+        const json = (await res.json()) as IndiaAqiApiResponse;
+        let cityPayload: CityAqiResponse | null = json.cityDetail ?? null;
+
+        if (!cityPayload) {
+          const fallbackParams = new URLSearchParams({ city: cityName });
+          if (stationId && stationId !== 'all') {
+            fallbackParams.set('station', stationId);
+          }
+          const fallbackRes = await fetch(
+            buildApiUrl(`/api/aqi?${fallbackParams.toString()}`),
+            { signal: controller.signal }
+          );
+          if (!fallbackRes.ok) {
+            throw new Error(
+              `Air quality service returned HTTP ${fallbackRes.status}.`
+            );
+          }
+          cityPayload = (await fallbackRes.json()) as CityAqiResponse;
+        }
+
+        if (seq === aqiSeqRef.current && cityPayload) {
+          setAqiData(cityPayload);
         }
       } catch (err) {
         if (err instanceof Error && err.name === 'AbortError') {

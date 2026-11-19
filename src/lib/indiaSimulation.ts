@@ -672,6 +672,11 @@ export function queryIndiaSimulatedApi(options?: {
         });
 
   return {
+    success: true,
+    data_type: SIMULATION_DATA_TYPE,
+    data_source: SIMULATION_DATA_SOURCE,
+    generated_at: snapshot.generatedAt,
+    total_stations: filtered.length,
     stations: filtered,
     summary,
     states: snapshot.states,
@@ -851,8 +856,15 @@ export const INDIA_SIMULATED_CITIES: SimulatedCityCatalogEntry[] = (() => {
 const CITY_CANONICAL_ALIASES: Record<string, string> = {
   gurgaon: 'Gurugram',
   bangalore: 'Bengaluru',
+  bombay: 'Mumbai',
   calcutta: 'Kolkata',
+  madras: 'Chennai',
+  poona: 'Pune',
+  baroda: 'Vadodara',
+  panjim: 'Panaji',
+  mangalore: 'Mangaluru',
   'new delhi': 'Delhi',
+  'delhi ncr': 'Delhi',
   trivandrum: 'Thiruvananthapuram',
   cochin: 'Kochi',
   vizag: 'Visakhapatnam',
@@ -860,19 +872,36 @@ const CITY_CANONICAL_ALIASES: Record<string, string> = {
   pondicherry: 'Puducherry',
   hubli: 'Hubballi',
   banaras: 'Varanasi',
+  benares: 'Varanasi',
   allahabad: 'Prayagraj',
 };
 
 export function resolveSimulatedCityName(query: string): string | null {
   const trimmed = query.trim();
   if (!trimmed) return 'Delhi';
-  const lower = trimmed.toLowerCase();
+  const primaryPart = trimmed.includes(',')
+    ? trimmed.split(',')[0].trim()
+    : trimmed;
+  const lower = primaryPart.toLowerCase();
   const aliased = CITY_CANONICAL_ALIASES[lower];
-  const target = (aliased ?? trimmed).toLowerCase();
+  const target = (aliased ?? primaryPart).toLowerCase();
   const match = INDIA_SIMULATED_CITIES.find(
     (c) => c.name.toLowerCase() === target
   );
-  return match?.name ?? null;
+  if (match) return match.name;
+
+  // Also resolve if an Indian State or UT name/code was supplied
+  const stateMatch = INDIA_STATES_AND_UTS.find(
+    (s) => s.name.toLowerCase() === target || s.code.toLowerCase() === target
+  );
+  if (stateMatch) {
+    const stateCity = INDIA_SIMULATED_CITIES.find(
+      (c) => c.stateCode.toLowerCase() === stateMatch.code.toLowerCase()
+    );
+    if (stateCity) return stateCity.name;
+  }
+
+  return null;
 }
 
 export function buildSimulatedCityAqiResponse(
