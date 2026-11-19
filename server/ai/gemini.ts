@@ -216,14 +216,17 @@ function isModelOrConfigUnsupportedError(msg: string): boolean {
   );
 }
 
-function isAuthError(msg: string): boolean {
+function isInvalidApiKeyError(msg: string): boolean {
   return (
-    msg.includes('PERMISSION_DENIED') ||
     msg.includes('API_KEY_INVALID') ||
     msg.includes('INVALID_API_KEY') ||
-    msg.includes('401') ||
-    msg.includes('403')
+    msg.includes('API key not valid') ||
+    msg.includes('401')
   );
+}
+
+function isPermissionDeniedError(msg: string): boolean {
+  return msg.includes('PERMISSION_DENIED') || msg.includes('403');
 }
 
 const RESPONSE_SCHEMA = {
@@ -449,22 +452,23 @@ export async function generateAerisRecommendations(params: {
       lastErr = err;
       const msg = redactSecrets(err instanceof Error ? err.message : String(err));
 
-      if (isAuthError(msg)) {
+      if (isInvalidApiKeyError(msg)) {
         console.error(
-          `Gemini auth error on ${model} after ${Date.now() - startedAt}ms:`,
+          `Gemini invalid API key error on ${model} after ${Date.now() - startedAt}ms:`,
           msg
         );
         throw new Error(
-          'Gemini API rejected the server credentials (401/403). Verify GEMINI_API_KEY in your Vercel Environment Variables (without quotes or extra spaces).'
+          'Gemini API rejected the server API key (API_KEY_INVALID). Verify GEMINI_API_KEY in your Vercel Environment Variables (without quotes or extra spaces).'
         );
       }
 
+      const isPermissionDenied = isPermissionDeniedError(msg);
       const isModelIssue = isModelOrConfigUnsupportedError(msg);
       const isTransient = isNetworkOrTransientError(err, msg);
       const hasMoreAttempts = attempt < attempts.length - 1;
       const remainingAfterError = OVERALL_DEADLINE_MS - (Date.now() - startedAt);
       const willRetry =
-        (isModelIssue || isTransient) &&
+        (isModelIssue || isPermissionDenied || isTransient) &&
         hasMoreAttempts &&
         remainingAfterError >= MIN_RETRY_BUDGET_MS;
 
@@ -473,7 +477,11 @@ export async function generateAerisRecommendations(params: {
           `Gemini attempt ${attempt + 1}/${attempts.length} (${model}) retrying with fallback after ${Date.now() - startedAt}ms:`,
           msg
         );
-        if (isTransient && !isTimeoutOrAbortError(err, msg)) {
+        if (
+          isTransient &&
+          !isTimeoutOrAbortError(err, msg) &&
+          !isPermissionDenied
+        ) {
           const backoffMs = Math.min(350 * 2 ** attempt, 800);
           await new Promise((r) => setTimeout(r, backoffMs));
         }
@@ -484,6 +492,12 @@ export async function generateAerisRecommendations(params: {
         `Gemini request failed on final attempt ${attempt + 1}/${attempts.length} (${model}) after ${Date.now() - startedAt}ms:`,
         msg
       );
+
+      if (isPermissionDenied) {
+        throw new Error(
+          'Gemini API denied permission for the server credentials (403 PERMISSION_DENIED). Verify GEMINI_API_KEY in Vercel and ensure the Generative Language API is enabled for that key.'
+        );
+      }
 
       if (isTimeoutOrAbortError(err, msg)) {
         throw new Error(
