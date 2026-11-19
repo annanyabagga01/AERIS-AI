@@ -5,10 +5,14 @@ import {
   type FirebaseApp,
 } from 'firebase/app';
 import {
+  browserLocalPersistence,
   getAuth,
+  getRedirectResult,
   GoogleAuthProvider,
   onAuthStateChanged,
+  setPersistence,
   signInWithPopup,
+  signInWithRedirect,
   signOut,
   type Auth,
   type User,
@@ -75,34 +79,155 @@ const resolvedFirebase = resolveFirebaseClientConfig({
 
 const firebaseConfig: FirebaseClientConfig = resolvedFirebase.config;
 
+let app: FirebaseApp | null = null;
+let dbInstance: Firestore | null = null;
+let authInstance: Auth | null = null;
+let googleProviderInstance: GoogleAuthProvider | null = null;
+let firebaseInitError: string | null = null;
+
+if (resolvedFirebase.configured) {
+  try {
+    app = getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    firebaseInitError = `Firebase initializeApp() failed: ${message}`;
+    console.error('[AERIS Firebase Init Error] initializeApp() failed:', err);
+  }
+
+  if (app) {
+    try {
+      dbInstance = firebaseConfig.firestoreDatabaseId
+        ? getFirestore(app, firebaseConfig.firestoreDatabaseId)
+        : getFirestore(app);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      firebaseInitError =
+        firebaseInitError ?? `Firebase getFirestore() failed: ${message}`;
+      console.error('[AERIS Firebase Init Error] getFirestore() failed:', err);
+    }
+
+    try {
+      authInstance = getAuth(app);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      firebaseInitError =
+        firebaseInitError ?? `Firebase getAuth() failed: ${message}`;
+      console.error('[AERIS Firebase Init Error] getAuth() failed:', err);
+    }
+  }
+}
+
+try {
+  const provider = new GoogleAuthProvider();
+  provider.addScope('email');
+  provider.addScope('profile');
+  provider.setCustomParameters({ prompt: 'select_account' });
+  googleProviderInstance = provider;
+} catch (err) {
+  const message = err instanceof Error ? err.message : String(err);
+  firebaseInitError =
+    firebaseInitError ?? `GoogleAuthProvider initialization failed: ${message}`;
+  console.error(
+    '[AERIS Firebase Init Error] GoogleAuthProvider initialization failed:',
+    err
+  );
+}
+
+export const db: Firestore | null = dbInstance;
+export const auth: Auth | null = authInstance;
+export const googleProvider: GoogleAuthProvider | null = googleProviderInstance;
+export { firebaseInitError };
+
 export function isFirebaseConfigured(): boolean {
-  return resolvedFirebase.configured;
+  return Boolean(
+    resolvedFirebase.configured &&
+      app &&
+      auth &&
+      googleProvider &&
+      !firebaseInitError
+  );
 }
 
 export function getFirebasePublicStatus(): FirebasePublicStatus {
   return {
-    configured: resolvedFirebase.configured,
+    configured: isFirebaseConfigured(),
     source: resolvedFirebase.source,
     projectId: firebaseConfig.projectId || null,
     authDomain: firebaseConfig.authDomain || null,
     hasNamedDatabase: Boolean(firebaseConfig.firestoreDatabaseId),
     warnings: [...resolvedFirebase.warnings],
+    missingEnvVars: [...resolvedFirebase.missingEnvVars],
+    initError: firebaseInitError,
   };
 }
 
-const app: FirebaseApp | null = resolvedFirebase.configured
-  ? getApps().length > 0
-    ? getApp()
-    : initializeApp(firebaseConfig)
-  : null;
-export const db: Firestore | null = app
-  ? firebaseConfig.firestoreDatabaseId
-    ? getFirestore(app, firebaseConfig.firestoreDatabaseId)
-    : getFirestore(app)
-  : null;
-export const auth: Auth | null = app ? getAuth(app) : null;
-const googleProvider = new GoogleAuthProvider();
-googleProvider.setCustomParameters({ prompt: 'select_account' });
+// Startup diagnostic console logging for Firebase auth object check and initialization errors
+// (never logs API keys or user credentials).
+if (typeof console !== 'undefined') {
+  const authCheckSummary = {
+    configured: resolvedFirebase.configured,
+    source: resolvedFirebase.source,
+    projectId: firebaseConfig.projectId || null,
+    authDomain: firebaseConfig.authDomain || null,
+    appInitialized: Boolean(app),
+    authInitialized: Boolean(auth),
+    authAppName: auth?.app?.name ?? null,
+    authConfigDomain: auth?.config?.authDomain ?? null,
+    googleProviderInitialized: Boolean(googleProvider),
+    googleProviderId: googleProvider?.providerId ?? null,
+    missingEnvVars: resolvedFirebase.missingEnvVars,
+    initError: firebaseInitError,
+  };
+
+  if (firebaseInitError) {
+    console.error(
+      '[AERIS Firebase] Startup initialization failed:',
+      authCheckSummary
+    );
+  } else if (!auth) {
+    console.warn(
+      '[AERIS Firebase] Startup auth object check: auth is null (Firebase not configured):',
+      authCheckSummary
+    );
+  } else {
+    console.info(
+      '[AERIS Firebase] Startup auth object check passed:',
+      authCheckSummary
+    );
+  }
+
+  if (resolvedFirebase.warnings.length > 0) {
+    console.warn(
+      '[AERIS Firebase] Startup configuration warnings:',
+      resolvedFirebase.warnings
+    );
+  }
+}
+
+let persistenceReadyPromise: Promise<void> | null = null;
+function ensureAuthPersistence(): Promise<void> {
+  if (!auth) return Promise.resolve();
+  if (!persistenceReadyPromise) {
+    persistenceReadyPromise = setPersistence(auth, browserLocalPersistence).catch(
+      (err) => {
+        console.warn(
+          '[AERIS Firebase] setPersistence(browserLocalPersistence) fell back to default:',
+          err instanceof Error ? err.message : String(err)
+        );
+      }
+    );
+  }
+  return persistenceReadyPromise;
+}
+
+function isTopLevelBrowserWindow(): boolean {
+  if (typeof window === 'undefined') return false;
+  try {
+    return window.self === window.top;
+  } catch {
+    return false;
+  }
+}
 
 export const OperationType = {
   CREATE: 'create',
@@ -180,19 +305,101 @@ export function subscribeAuth(cb: (user: User | null) => void): Unsubscribe {
     cb(null);
     return () => {};
   }
+  void ensureAuthPersistence();
   return onAuthStateChanged(auth, cb);
 }
 
-export async function signInWithGoogle(): Promise<User> {
+/**
+ * Completes any pending Google OAuth redirect sign-in (used only when a
+ * top-level browser blocks popups and falls back to signInWithRedirect).
+ */
+export async function completeGoogleRedirectSignIn(): Promise<{
+  user: User | null;
+  error: string | null;
+}> {
   if (!auth) {
-    throw new Error(
-      'Firebase Authentication is not configured. Provide local firebase-applet-config.json or complete VITE_FIREBASE_* environment variables.'
-    );
+    return { user: null, error: null };
   }
   try {
-    const cred = await signInWithPopup(auth, googleProvider);
-    return cred.user;
+    await ensureAuthPersistence();
+    const result = await getRedirectResult(auth);
+    return { user: result?.user ?? null, error: null };
   } catch (error) {
+    console.error(
+      '[AERIS Firebase] getRedirectResult() failed during startup:',
+      error instanceof Error ? error.message : String(error)
+    );
+    const currentHost =
+      typeof window !== 'undefined' ? window.location.hostname : null;
+    return {
+      user: null,
+      error: formatFirebaseAuthError(error, {
+        projectId: firebaseConfig.projectId || null,
+        authDomain: firebaseConfig.authDomain || null,
+        currentHost,
+      }),
+    };
+  }
+}
+
+export async function signInWithGoogle(): Promise<{
+  user: User | null;
+  redirected: boolean;
+}> {
+  if (!auth || !googleProvider) {
+    if (firebaseInitError) {
+      console.error(
+        '[AERIS Firebase] Cannot start Google Sign-In due to startup initialization error:',
+        firebaseInitError
+      );
+      throw new Error(
+        `Firebase Authentication failed to initialize at startup: ${firebaseInitError}`
+      );
+    }
+    const missing = resolvedFirebase.missingEnvVars;
+    const missingHint =
+      missing.length > 0
+        ? ` Missing environment variables: ${missing.join(', ')}.`
+        : '';
+    console.warn(
+      '[AERIS Firebase] signInWithGoogle() aborted: auth instance is null.',
+      { missingEnvVars: missing }
+    );
+    throw new Error(
+      `Firebase Authentication is not configured in this deployment.${missingHint} Configure VITE_FIREBASE_* variables in Vercel and redeploy.`
+    );
+  }
+  await ensureAuthPersistence();
+  try {
+    const cred = await signInWithPopup(auth, googleProvider);
+    return { user: cred.user, redirected: false };
+  } catch (error) {
+    const errorCode =
+      error && typeof error === 'object' && 'code' in error
+        ? String((error as { code?: unknown }).code ?? '')
+        : '';
+
+    console.error('[AERIS Firebase] signInWithPopup() failed:', {
+      code: errorCode || 'unknown',
+      authDomain: firebaseConfig.authDomain || null,
+      currentHost:
+        typeof window !== 'undefined' ? window.location.hostname : null,
+    });
+
+    // Fall back to redirect only on top-level windows (e.g. mobile browsers on Vercel)
+    // when popups are blocked; keep popup-only inside iframes.
+    if (
+      (errorCode === 'auth/popup-blocked' ||
+        errorCode === 'auth/operation-not-supported-in-this-environment') &&
+      isTopLevelBrowserWindow()
+    ) {
+      console.info(
+        '[AERIS Firebase] Falling back to signInWithRedirect() on top-level window.'
+      );
+      await signInWithRedirect(auth, googleProvider);
+      return { user: null, redirected: true };
+    }
+
     const currentHost =
       typeof window !== 'undefined' ? window.location.hostname : null;
     throw new Error(

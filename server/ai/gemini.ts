@@ -19,6 +19,18 @@ import type {
 } from '../../src/lib/types.ts';
 import { redactSecrets } from '../security.ts';
 
+const OVERALL_DEADLINE_MS = 28_000;
+const MAX_PER_ATTEMPT_TIMEOUT_MS = 21_000;
+const MIN_RETRY_BUDGET_MS = 3_000;
+
+const PLACEHOLDER_KEYS = new Set([
+  'MY_GEMINI_API_KEY',
+  'YOUR_GEMINI_API_KEY',
+  'REPLACE_ME',
+  'UNDEFINED',
+  'NULL',
+]);
+
 const SYSTEM_INSTRUCTION = `You are AERIS AI, an urban air quality, winter smog, indoor air, and sustainable lifestyle advisor for Indian families across all 28 Indian states and 8 Union Territories.
 
 STRICT ACCURACY, SAFETY & TRANSPARENCY RULES:
@@ -33,12 +45,263 @@ STRICT ACCURACY, SAFETY & TRANSPARENCY RULES:
 9. Generate personalized morning, afternoon, and evening schedules adapted to the household's work/school hours, commute mode, children/older adult flags, and pollutionSensitiveHousehold toggle.
 10. CONCISENESS: Keep summary <= 2 sentences, each bullet in arrays <= 18 words, and each morning/afternoon/evening entry <= 22 words for fast, scannable guidance.`;
 
-export function isGeminiConfigured(): boolean {
-  const key = process.env.GEMINI_API_KEY?.trim();
-  return Boolean(
-    key && key !== 'MY_GEMINI_API_KEY' && key !== 'YOUR_GEMINI_API_KEY'
+function cleanEnvValue(raw: string | undefined): string {
+  if (typeof raw !== 'string') return '';
+  let value = raw.trim();
+  if (
+    (value.startsWith('"') && value.endsWith('"')) ||
+    (value.startsWith("'") && value.endsWith("'"))
+  ) {
+    value = value.slice(1, -1).trim();
+  }
+  return value;
+}
+
+/**
+ * Loads GEMINI_API_KEY from server environment variables (process.env),
+ * normalizing accidental surrounding quotes or whitespace from deployment dashboards.
+ */
+export function loadGeminiApiKey(
+  env: Record<string, string | undefined> = process.env
+): string | null {
+  const key = cleanEnvValue(env.GEMINI_API_KEY);
+  if (!key) return null;
+  if (PLACEHOLDER_KEYS.has(key.toUpperCase())) return null;
+  return key;
+}
+
+export function isGeminiConfigured(
+  env: Record<string, string | undefined> = process.env
+): boolean {
+  return loadGeminiApiKey(env) !== null;
+}
+
+export interface GeminiContentTurn {
+  role: 'user' | 'model';
+  parts: Array<{ text: string }>;
+}
+
+/**
+ * Builds a strictly alternating user/model `contents` array for `@google/genai`:
+ * - Always starts with a `user` turn.
+ * - Merges consecutive same-role turns in history.
+ * - Drops any trailing `user` turn in history (e.g., from a Retry) before appending
+ *   the current user payload so consecutive `user` turns never cause 400 INVALID_ARGUMENT.
+ */
+export function buildGeminiContents(
+  history: ChatHistoryTurn[] | undefined,
+  currentUserPayloadText: string
+): GeminiContentTurn[] {
+  const boundedHistory = sanitizeChatHistory(history, 8);
+  const alternating: GeminiContentTurn[] = [];
+
+  for (const turn of boundedHistory) {
+    const role: 'user' | 'model' = turn.role === 'assistant' ? 'model' : 'user';
+    if (alternating.length === 0 && role !== 'user') {
+      continue;
+    }
+    const prev = alternating[alternating.length - 1];
+    if (prev && prev.role === role) {
+      prev.parts[0].text = `${prev.parts[0].text}\n${turn.text}`.slice(0, 1200);
+    } else {
+      alternating.push({
+        role,
+        parts: [{ text: turn.text }],
+      });
+    }
+  }
+
+  // Ensure the turn immediately preceding the current user prompt is `model` (never `user`).
+  while (
+    alternating.length > 0 &&
+    alternating[alternating.length - 1].role === 'user'
+  ) {
+    alternating.pop();
+  }
+
+  alternating.push({
+    role: 'user',
+    parts: [{ text: currentUserPayloadText }],
+  });
+
+  return alternating;
+}
+
+/**
+ * Strips markdown code fences and extracts a valid JSON object from Gemini output.
+ */
+export function parseGeminiJsonResponse(
+  rawText: string
+): AiRecommendationStructured {
+  const cleaned = rawText
+    .trim()
+    .replace(/^```(?:json)?\s*/i, '')
+    .replace(/\s*```$/i, '')
+    .trim();
+
+  if (!cleaned) {
+    throw new Error('Gemini returned an empty response.');
+  }
+
+  try {
+    return JSON.parse(cleaned) as AiRecommendationStructured;
+  } catch {
+    const firstBrace = cleaned.indexOf('{');
+    const lastBrace = cleaned.lastIndexOf('}');
+    if (firstBrace !== -1 && lastBrace > firstBrace) {
+      const candidate = cleaned.slice(firstBrace, lastBrace + 1);
+      try {
+        return JSON.parse(candidate) as AiRecommendationStructured;
+      } catch {
+        // Fall through to structured error below
+      }
+    }
+    throw new Error(
+      'Gemini returned an unreadable response format. Please retry your question.'
+    );
+  }
+}
+
+function isTimeoutOrAbortError(err: unknown, msg: string): boolean {
+  if (
+    err instanceof Error &&
+    (err.name === 'TimeoutError' || err.name === 'AbortError')
+  ) {
+    return true;
+  }
+  const lower = msg.toLowerCase();
+  return (
+    lower.includes('operation was aborted') ||
+    lower.includes('signal timed out') ||
+    lower.includes('aborted due to timeout')
   );
 }
+
+function isNetworkOrTransientError(err: unknown, msg: string): boolean {
+  if (isTimeoutOrAbortError(err, msg)) {
+    return true;
+  }
+  const lower = msg.toLowerCase();
+  return (
+    msg.includes('503') ||
+    msg.includes('502') ||
+    msg.includes('504') ||
+    msg.includes('500') ||
+    msg.includes('UNAVAILABLE') ||
+    msg.includes('DEADLINE_EXCEEDED') ||
+    msg.includes('INTERNAL') ||
+    msg.includes('429') ||
+    msg.includes('RESOURCE_EXHAUSTED') ||
+    lower.includes('fetch failed') ||
+    lower.includes('network') ||
+    lower.includes('econnreset') ||
+    lower.includes('etimedout') ||
+    lower.includes('enotfound') ||
+    lower.includes('eai_again') ||
+    lower.includes('socket hang up') ||
+    lower.includes('und_err_')
+  );
+}
+
+function isModelOrConfigUnsupportedError(msg: string): boolean {
+  const lower = msg.toLowerCase();
+  return (
+    msg.includes('NOT_FOUND') ||
+    msg.includes('404') ||
+    lower.includes('is not found') ||
+    lower.includes('not supported') ||
+    lower.includes('thinking_level') ||
+    lower.includes('thinkinglevel') ||
+    lower.includes('thinkingconfig')
+  );
+}
+
+function isAuthError(msg: string): boolean {
+  return (
+    msg.includes('PERMISSION_DENIED') ||
+    msg.includes('API_KEY_INVALID') ||
+    msg.includes('INVALID_API_KEY') ||
+    msg.includes('401') ||
+    msg.includes('403')
+  );
+}
+
+const RESPONSE_SCHEMA = {
+  type: Type.OBJECT,
+  properties: {
+    summary: {
+      type: Type.STRING,
+      description:
+        'Clear 2-sentence direct answer grounded strictly in the simulated AQI, timestamp, source, and user question.',
+    },
+    currentRisk: {
+      type: Type.STRING,
+      description:
+        'CPCB category and precautionary risk tier (explicitly state simulated data / demo mode).',
+    },
+    recommendedActions: {
+      type: Type.ARRAY,
+      items: { type: Type.STRING },
+      description:
+        '3 concise, actionable steps covering outdoor/school activity, protective precautions, or sustainable habits.',
+    },
+    avoidActions: {
+      type: Type.ARRAY,
+      items: { type: Type.STRING },
+      description: '3 concise actions or pollution exposures to avoid.',
+    },
+    indoorAdvice: {
+      type: Type.ARRAY,
+      items: { type: Type.STRING },
+      description:
+        '3 concise indoor air steps: ventilation timing, HEPA/low-cost filtration, wet mopping, kitchen exhaust, smoke-free living.',
+    },
+    commuteAdvice: {
+      type: Type.ARRAY,
+      items: { type: Type.STRING },
+      description:
+        '2 to 3 commuting & eco choices respecting AQI safety thresholds and transparent kg CO2e estimates.',
+    },
+    dailySchedule: {
+      type: Type.OBJECT,
+      properties: {
+        morning: { type: Type.STRING },
+        afternoon: { type: Type.STRING },
+        evening: { type: Type.STRING },
+      },
+      required: ['morning', 'afternoon', 'evening'],
+      description:
+        'Personalized morning, afternoon, and evening routine adapted to school/work hours and household sensitivity.',
+    },
+    reasoning: {
+      type: Type.STRING,
+      description:
+        'Brief 1-2 sentence explanation citing pollutant readings, timestamp freshness, and household sensitivity factors.',
+    },
+    sourceReferences: {
+      type: Type.ARRAY,
+      items: { type: Type.STRING },
+      description: 'Sources only from allowedSourceReferences.',
+    },
+    dataLimitations: {
+      type: Type.STRING,
+      description:
+        'Explicit note on simulated data mode, no future forecasts, and non-medical precautionary notice.',
+    },
+  },
+  required: [
+    'summary',
+    'currentRisk',
+    'recommendedActions',
+    'avoidActions',
+    'indoorAdvice',
+    'commuteAdvice',
+    'dailySchedule',
+    'reasoning',
+    'sourceReferences',
+    'dataLimitations',
+  ],
+};
 
 export async function generateAerisRecommendations(params: {
   aqiContext: CityAqiResponse;
@@ -46,25 +309,32 @@ export async function generateAerisRecommendations(params: {
   userPrompt?: string;
   history?: ChatHistoryTurn[];
 }): Promise<AiRecommendationStructured> {
-  const apiKey = process.env.GEMINI_API_KEY?.trim();
-  if (
-    !apiKey ||
-    apiKey === 'MY_GEMINI_API_KEY' ||
-    apiKey === 'YOUR_GEMINI_API_KEY'
-  ) {
+  const apiKey = loadGeminiApiKey();
+  if (!apiKey) {
     throw new Error(
-      'GEMINI_API_KEY is not configured on the server. Add it in Settings > Secrets to enable live Gemini AI recommendations.'
+      'GEMINI_API_KEY is not configured on the server. Set GEMINI_API_KEY in your Vercel Project Environment Variables (or Settings > Secrets) and redeploy to enable live Gemini AI responses.'
     );
   }
 
-  const ai = new GoogleGenAI({
-    apiKey,
-    httpOptions: {
-      headers: {
-        'User-Agent': 'aistudio-build',
+  let ai: GoogleGenAI;
+  try {
+    ai = new GoogleGenAI({
+      apiKey,
+      httpOptions: {
+        headers: {
+          'User-Agent': 'aistudio-build',
+        },
       },
-    },
-  });
+    });
+  } catch (initErr) {
+    const safeMsg = redactSecrets(
+      initErr instanceof Error ? initErr.message : String(initErr)
+    );
+    console.error('Failed to initialize @google/genai SDK:', safeMsg);
+    throw new Error(
+      'Gemini SDK failed to initialize on the server. Verify GEMINI_API_KEY is properly configured.'
+    );
+  }
 
   const activeStation =
     (params.aqiContext.selectedStationId
@@ -83,23 +353,10 @@ export async function generateAerisRecommendations(params: {
   const pollutantSummary = activeStation
     ? activeStation.pollutants.map((p) => ({
         pollutant: p.label,
-        average: p.value,
-        min: p.min,
-        max: p.max,
+        avg: p.value,
         unit: p.unit,
-        unitCompatibleWithCpcb: p.unitCompatibleWithCpcb !== false,
       }))
     : [];
-
-  const openAqSample = params.aqiContext.openAqSensors.slice(0, 6).map((s) => ({
-    location: s.locationName,
-    parameter: s.parameter,
-    value: s.value,
-    unit: s.unit,
-    lastUpdatedIso: s.lastUpdatedIso,
-    isStale: s.isStale,
-    note: 'OpenAQ v3 raw sensor reading — separate from official Indian National AQI',
-  }));
 
   const contextPayload = {
     location: {
@@ -109,35 +366,23 @@ export async function generateAerisRecommendations(params: {
       stationCountInCity: params.aqiContext.stations.length,
     },
     airQualityData: {
-      officialAqi: params.aqiContext.primaryAqi,
+      simulatedAqi: params.aqiContext.primaryAqi,
       cpcbCategory: params.aqiContext.category,
-      cpcbCategoryMeta: CPCB_CATEGORY_META[params.aqiContext.category].rangeLabel,
+      rangeLabel: CPCB_CATEGORY_META[params.aqiContext.category].rangeLabel,
       officialCpcbHealthImplication:
         CPCB_HEALTH_BANDS[params.aqiContext.category].officialHealthImplication,
       predominantPollutant: params.aqiContext.predominantPollutant,
       dataMode: params.aqiContext.dataMode,
-      sourceDisclaimer: params.aqiContext.sourceDisclaimer,
       lastUpdatedIso: params.aqiContext.lastUpdatedIso,
-      stationIsStale: activeStation?.isStale ?? true,
-      staleStationsCount: params.aqiContext.staleStationsCount,
       pollutants: pollutantSummary,
-      openAqSensorsSeparate: openAqSample,
     },
     cpcbHealthGuidance: {
-      category: cpcbHealthGuidance.category,
-      rangeLabel: cpcbHealthGuidance.rangeLabel,
-      officialHealthImplication: cpcbHealthGuidance.officialHealthImplication,
       avoidOutdoorPhysicalActivity: cpcbHealthGuidance.avoidOutdoorPhysicalActivity,
       outdoorActivityHeadline: cpcbHealthGuidance.outdoorActivityHeadline,
       generalPopulationGuidance: cpcbHealthGuidance.generalPopulationGuidance,
       sensitiveHouseholdGuidance: cpcbHealthGuidance.sensitiveHouseholdGuidance,
-      observedTimestampDisplay: cpcbHealthGuidance.observedTimestampDisplay,
-      dataLimitations: cpcbHealthGuidance.dataLimitations,
-      sourceCitations: cpcbHealthGuidance.sourceCitations,
-      medicalDisclaimer: cpcbHealthGuidance.medicalDisclaimer,
-      protectiveEquipmentCaveat: cpcbHealthGuidance.protectiveEquipmentCaveat,
     },
-    verificationStatus,
+    verificationNotice: verificationStatus.verificationNotice,
     allowedSourceReferences,
     familyPreferences: {
       householdSize: params.preferences.householdSize,
@@ -155,146 +400,99 @@ export async function generateAerisRecommendations(params: {
       'Provide a structured morning, afternoon, and evening air quality, indoor protection, commuting, and eco impact plan for my household today.',
   };
 
-  const boundedHistory = sanitizeChatHistory(params.history, 8);
-  const contents = [
-    ...boundedHistory.map((turn) => ({
-      role: turn.role === 'assistant' ? ('model' as const) : ('user' as const),
-      parts: [{ text: turn.text }],
-    })),
-    {
-      role: 'user' as const,
-      parts: [{ text: JSON.stringify(contextPayload) }],
-    },
-  ];
+  const contents = buildGeminiContents(
+    params.history,
+    JSON.stringify(contextPayload)
+  );
 
   let response;
   let lastErr: unknown;
   const startedAt = Date.now();
-  const attempts: Array<{ model: string; thinkingLevel: ThinkingLevel }> = [
-    { model: 'gemini-4-hydrogen', thinkingLevel: ThinkingLevel.LOW },
+  const configuredModel = cleanEnvValue(process.env.GEMINI_MODEL);
+  const attempts: Array<{ model: string; thinkingLevel?: ThinkingLevel }> = [
+    ...(configuredModel ? [{ model: configuredModel }] : []),
     { model: 'gemini-3.1-flash-lite', thinkingLevel: ThinkingLevel.MINIMAL },
-  ];
+    { model: 'gemini-4-hydrogen', thinkingLevel: ThinkingLevel.LOW },
+    { model: 'gemini-2.5-flash' },
+  ].filter(
+    (entry, idx, list) =>
+      list.findIndex((item) => item.model === entry.model) === idx
+  );
 
   for (let attempt = 0; attempt < attempts.length; attempt++) {
+    const elapsedMs = Date.now() - startedAt;
+    const remainingMs = OVERALL_DEADLINE_MS - elapsedMs;
+    if (attempt > 0 && remainingMs < MIN_RETRY_BUDGET_MS) {
+      break;
+    }
+
+    const attemptTimeoutMs = Math.max(
+      MIN_RETRY_BUDGET_MS,
+      Math.min(MAX_PER_ATTEMPT_TIMEOUT_MS, remainingMs)
+    );
     const { model, thinkingLevel } = attempts[attempt];
+
     try {
       response = await ai.models.generateContent({
         model,
         contents,
         config: {
-          abortSignal: AbortSignal.timeout(15000),
+          abortSignal: AbortSignal.timeout(attemptTimeoutMs),
           systemInstruction: SYSTEM_INSTRUCTION,
-          thinkingConfig: { thinkingLevel },
+          ...(thinkingLevel ? { thinkingConfig: { thinkingLevel } } : {}),
           responseMimeType: 'application/json',
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              summary: {
-                type: Type.STRING,
-                description:
-                  'Clear 2-sentence direct answer grounded strictly in the verified AQI, timestamp, source, and user question.',
-              },
-              currentRisk: {
-                type: Type.STRING,
-                description:
-                  'CPCB category and precautionary risk tier (explicitly state if live AQI cannot be verified).',
-              },
-              recommendedActions: {
-                type: Type.ARRAY,
-                items: { type: Type.STRING },
-                description:
-                  '3 concise, actionable steps covering outdoor/school activity, protective precautions, or sustainable habits.',
-              },
-              avoidActions: {
-                type: Type.ARRAY,
-                items: { type: Type.STRING },
-                description:
-                  '3 concise actions or pollution exposures to avoid.',
-              },
-              indoorAdvice: {
-                type: Type.ARRAY,
-                items: { type: Type.STRING },
-                description:
-                  '3 concise indoor air steps: ventilation timing, HEPA/low-cost filtration, wet mopping, kitchen exhaust, smoke-free living.',
-              },
-              commuteAdvice: {
-                type: Type.ARRAY,
-                items: { type: Type.STRING },
-                description:
-                  '2 to 3 commuting & eco choices respecting AQI safety thresholds and transparent kg CO2e estimates.',
-              },
-              dailySchedule: {
-                type: Type.OBJECT,
-                properties: {
-                  morning: { type: Type.STRING },
-                  afternoon: { type: Type.STRING },
-                  evening: { type: Type.STRING },
-                },
-                required: ['morning', 'afternoon', 'evening'],
-                description:
-                  'Personalized morning, afternoon, and evening routine adapted to school/work hours and household sensitivity.',
-              },
-              reasoning: {
-                type: Type.STRING,
-                description:
-                  'Brief 1-2 sentence explanation citing verified pollutant readings, timestamp freshness, and household sensitivity factors.',
-              },
-              sourceReferences: {
-                type: Type.ARRAY,
-                items: { type: Type.STRING },
-                description:
-                  'Verified sources only from allowedSourceReferences.',
-              },
-              dataLimitations: {
-                type: Type.STRING,
-                description:
-                  'Explicit note on verification status, demo/stale/missing data limitations, no future forecasts, and non-medical precautionary notice.',
-              },
-            },
-            required: [
-              'summary',
-              'currentRisk',
-              'recommendedActions',
-              'avoidActions',
-              'indoorAdvice',
-              'commuteAdvice',
-              'dailySchedule',
-              'reasoning',
-              'sourceReferences',
-              'dataLimitations',
-            ],
-          },
+          responseSchema: RESPONSE_SCHEMA,
         },
       });
       break;
     } catch (err) {
       lastErr = err;
       const msg = redactSecrets(err instanceof Error ? err.message : String(err));
-      console.error(
-        `Gemini attempt ${attempt + 1} (${model}) failed after ${Date.now() - startedAt}ms:`,
-        msg
-      );
-      const isTransient =
-        msg.includes('503') ||
-        msg.includes('UNAVAILABLE') ||
-        msg.includes('429') ||
-        (err instanceof Error &&
-          (err.name === 'TimeoutError' || err.name === 'AbortError'));
-      if (isTransient && attempt < attempts.length - 1) {
-        await new Promise((r) => setTimeout(r, 500));
+
+      if (isAuthError(msg)) {
+        console.error(
+          `Gemini auth error on ${model} after ${Date.now() - startedAt}ms:`,
+          msg
+        );
+        throw new Error(
+          'Gemini API rejected the server credentials (401/403). Verify GEMINI_API_KEY in your Vercel Environment Variables (without quotes or extra spaces).'
+        );
+      }
+
+      const isModelIssue = isModelOrConfigUnsupportedError(msg);
+      const isTransient = isNetworkOrTransientError(err, msg);
+      const hasMoreAttempts = attempt < attempts.length - 1;
+      const remainingAfterError = OVERALL_DEADLINE_MS - (Date.now() - startedAt);
+      const willRetry =
+        (isModelIssue || isTransient) &&
+        hasMoreAttempts &&
+        remainingAfterError >= MIN_RETRY_BUDGET_MS;
+
+      if (willRetry) {
+        console.warn(
+          `Gemini attempt ${attempt + 1}/${attempts.length} (${model}) retrying with fallback after ${Date.now() - startedAt}ms:`,
+          msg
+        );
+        if (isTransient && !isTimeoutOrAbortError(err, msg)) {
+          const backoffMs = Math.min(350 * 2 ** attempt, 800);
+          await new Promise((r) => setTimeout(r, backoffMs));
+        }
         continue;
       }
-      if (err instanceof Error && (err.name === 'TimeoutError' || err.name === 'AbortError')) {
-        throw new Error('Gemini API timed out. Please retry.');
-      }
-      if (msg.includes('PERMISSION_DENIED') || msg.includes('API_KEY_INVALID')) {
+
+      console.error(
+        `Gemini request failed on final attempt ${attempt + 1}/${attempts.length} (${model}) after ${Date.now() - startedAt}ms:`,
+        msg
+      );
+
+      if (isTimeoutOrAbortError(err, msg)) {
         throw new Error(
-          'Gemini API rejected the server credentials. Check GEMINI_API_KEY in Settings > Secrets.'
+          'Gemini API timed out while generating a response. Please click Retry.'
         );
       }
       if (msg.includes('RESOURCE_EXHAUSTED') || msg.includes('429')) {
         throw new Error(
-          'Gemini API quota temporarily reached (429). Please wait a moment or check your billing tier in Settings > Secrets.'
+          'Gemini API quota temporarily reached (429). Please wait a moment or check your billing tier.'
         );
       }
       if (msg.includes('503') || msg.includes('UNAVAILABLE')) {
@@ -302,22 +500,40 @@ export async function generateAerisRecommendations(params: {
           'Gemini service is temporarily busy (503). Please try again in a moment.'
         );
       }
+      if (isTransient) {
+        throw new Error(
+          'Network error reaching the Gemini API from the server. Please click Retry.'
+        );
+      }
       throw new Error(msg);
     }
   }
 
   if (!response) {
-    throw lastErr instanceof Error
-      ? lastErr
-      : new Error('Gemini request failed.');
+    const finalMsg = redactSecrets(
+      lastErr instanceof Error ? lastErr.message : 'Gemini request failed.'
+    );
+    if (isTimeoutOrAbortError(lastErr, finalMsg)) {
+      throw new Error(
+        'Gemini API timed out while generating a response. Please click Retry.'
+      );
+    }
+    throw new Error(finalMsg);
   }
 
-  const rawText = (response.text ?? '').trim();
-  if (!rawText) {
-    throw new Error('Gemini returned an empty response.');
+  const rawText = response.text ?? '';
+  if (!rawText.trim()) {
+    const finishReason = response.candidates?.[0]?.finishReason;
+    if (finishReason && finishReason !== 'STOP') {
+      throw new Error(
+        `Gemini could not complete the response (finish reason: ${finishReason}). Please rephrase your question and retry.`
+      );
+    }
+    throw new Error('Gemini returned an empty response. Please click Retry.');
   }
 
-  const parsed = JSON.parse(rawText) as AiRecommendationStructured;
+  const parsed = parseGeminiJsonResponse(rawText);
+
   return enforceRecommendationGuardrails(
     parsed,
     params.aqiContext,

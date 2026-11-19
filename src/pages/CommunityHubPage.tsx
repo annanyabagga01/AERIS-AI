@@ -14,6 +14,7 @@ import {
   Users,
 } from 'lucide-react';
 import type { User } from 'firebase/auth';
+import { buildApiUrl } from '../lib/apiClient.ts';
 import {
   buildCommunityAggregates,
   containsSensitivePiiOrLocation,
@@ -23,6 +24,7 @@ import { ACTION_CATALOG } from '../lib/emissions.ts';
 import {
   deleteOptInContribution,
   formatFirestoreUiError,
+  getFirebasePublicStatus,
   isFirebaseConfigured,
   joinCommunityChallenge,
   leaveCommunityChallenge,
@@ -46,6 +48,9 @@ import type {
 interface CommunityHubPageProps {
   preferences: FamilyPreferences;
   onUpdatePreferences: (next: FamilyPreferences) => void;
+  authUser?: User | null;
+  authReady?: boolean;
+  authRedirectError?: string | null;
 }
 
 const DEMO_PARTICIPANTS: ChallengeParticipantRecord[] = [
@@ -58,10 +63,19 @@ const DEMO_PARTICIPANTS: ChallengeParticipantRecord[] = [
 export function CommunityHubPage({
   preferences,
   onUpdatePreferences,
+  authUser,
+  authReady: authReadyProp,
+  authRedirectError,
 }: CommunityHubPageProps) {
   const firebaseReady = isFirebaseConfigured();
-  const [user, setUser] = useState<User | null>(null);
-  const [authReady, setAuthReady] = useState(!firebaseReady);
+  const firebaseStatus = getFirebasePublicStatus();
+  const hasLiftedAuth = authReadyProp !== undefined;
+  const [localUser, setLocalUser] = useState<User | null>(authUser ?? null);
+  const [localAuthReady, setLocalAuthReady] = useState<boolean>(
+    authReadyProp ?? !firebaseReady
+  );
+  const user = hasLiftedAuth ? authUser ?? null : localUser;
+  const authReady = hasLiftedAuth ? Boolean(authReadyProp) : localAuthReady;
   const [authAction, setAuthAction] = useState<'idle' | 'signing_in' | 'signing_out'>('idle');
   const [demoChallenges, setDemoChallenges] = useState<CommunityChallenge[]>([]);
   const [demoContributions, setDemoContributions] = useState<
@@ -94,7 +108,7 @@ export function CommunityHubPage({
   useEffect(() => {
     void (async () => {
       try {
-        const res = await fetch('/api/community/demo');
+        const res = await fetch(buildApiUrl('/api/community/demo'));
         if (res.ok) {
           const json = (await res.json()) as {
             challenges: CommunityChallenge[];
@@ -109,17 +123,24 @@ export function CommunityHubPage({
     })();
   }, []);
 
-  // Auth subscription
   useEffect(() => {
+    if (authRedirectError) {
+      setErrorMessage(authRedirectError);
+    }
+  }, [authRedirectError]);
+
+  // Auth subscription fallback when rendered without lifted App auth state
+  useEffect(() => {
+    if (hasLiftedAuth) return () => {};
     if (!firebaseReady) {
-      setAuthReady(true);
+      setLocalAuthReady(true);
       return () => {};
     }
     return subscribeAuth((u) => {
-      setUser(u);
-      setAuthReady(true);
+      setLocalUser(u);
+      setLocalAuthReady(true);
     });
-  }, [firebaseReady]);
+  }, [firebaseReady, hasLiftedAuth]);
 
   // Live Firestore subscriptions ONLY when auth is ready, configured, signed in, AND explicitly opted in
   const isLiveOptIn = Boolean(
@@ -255,12 +276,22 @@ export function CommunityHubPage({
     setErrorMessage(null);
     setStatusMessage(null);
     if (!firebaseReady) {
-      setErrorMessage('Firebase configuration is not detected.');
+      const missingHint =
+        firebaseStatus.missingEnvVars.length > 0
+          ? ` Missing environment variables: ${firebaseStatus.missingEnvVars.join(', ')}.`
+          : '';
+      setErrorMessage(
+        `Firebase Authentication is not configured in this deployment.${missingHint} Configure VITE_FIREBASE_* variables in Vercel and redeploy.`
+      );
       return;
     }
     setAuthAction('signing_in');
     try {
-      await signInWithGoogle();
+      const result = await signInWithGoogle();
+      if (result.redirected) {
+        setStatusMessage('Redirecting to Google Sign-In...');
+        return;
+      }
       setStatusMessage(
         preferences.communityOptIn
           ? `Signed in with Google. Connected to live Firestore anonymously as "${preferences.anonymousHandle}".`
@@ -443,7 +474,11 @@ export function CommunityHubPage({
               ? `Signed in with Google (identity kept private; never shown publicly). Demo Community Preview is shown separately until you check "Opt-in to live community" to view and submit live anonymous Firestore actions as "${preferences.anonymousHandle}".`
               : firebaseReady
               ? 'Demo Community Preview (strictly separated from live Firestore totals). Sign in with Google and explicitly opt in to view and submit live anonymous community actions.'
-              : 'Firebase not configured; displaying labeled Demo Community Preview data only.'}
+              : `Firebase Authentication is not yet configured in this deployment${
+                  firebaseStatus.missingEnvVars.length > 0
+                    ? ` (missing ${firebaseStatus.missingEnvVars.join(', ')})`
+                    : ''
+                }. Displaying labeled Demo Community Preview data only.`}
           </p>
         </div>
 

@@ -14,9 +14,15 @@ import {
   X,
 } from 'lucide-react';
 import { AnimatePresence, motion } from 'motion/react';
+import type { User } from 'firebase/auth';
 import { ErrorBoundary } from './components/ErrorBoundary.tsx';
 import { buildApiUrl } from './lib/apiClient.ts';
 import { classifyCpcbAqi } from './lib/aqi.ts';
+import {
+  completeGoogleRedirectSignIn,
+  isFirebaseConfigured,
+  subscribeAuth,
+} from './lib/firebase.ts';
 import {
   loadImpactLog,
   loadPreferences,
@@ -199,6 +205,35 @@ function AerisShell() {
   const [impactEntries, setImpactEntries] = useState<ImpactLogEntry[]>(() =>
     loadImpactLog()
   );
+
+  const firebaseConfigured = isFirebaseConfigured();
+  const [authUser, setAuthUser] = useState<User | null>(null);
+  const [authReady, setAuthReady] = useState<boolean>(!firebaseConfigured);
+  const [authRedirectError, setAuthRedirectError] = useState<string | null>(
+    null
+  );
+
+  useEffect(() => {
+    if (!firebaseConfigured) {
+      setAuthReady(true);
+      return () => {};
+    }
+    let active = true;
+    void completeGoogleRedirectSignIn().then((res) => {
+      if (!active) return;
+      if (res.user) setAuthUser(res.user);
+      if (res.error) setAuthRedirectError(res.error);
+    });
+    const unsub = subscribeAuth((nextUser) => {
+      if (!active) return;
+      setAuthUser(nextUser);
+      setAuthReady(true);
+    });
+    return () => {
+      active = false;
+      unsub();
+    };
+  }, [firebaseConfigured]);
 
   const [selectedStation, setSelectedStation] = useState<string>('all');
   const [aqiData, setAqiData] = useState<CityAqiResponse | null>(null);
@@ -636,6 +671,9 @@ function AerisShell() {
                 <CommunityHubPage
                   preferences={preferences}
                   onUpdatePreferences={handleUpdatePreferences}
+                  authUser={authUser}
+                  authReady={authReady}
+                  authRedirectError={authRedirectError}
                 />
               )}
               {activeNav === 'settings' && (

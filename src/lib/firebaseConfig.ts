@@ -16,6 +16,7 @@ export interface ResolvedFirebaseConfig {
   source: FirebaseConfigSource;
   config: FirebaseClientConfig;
   warnings: string[];
+  missingEnvVars: string[];
 }
 
 export interface FirebasePublicStatus {
@@ -25,17 +26,27 @@ export interface FirebasePublicStatus {
   authDomain: string | null;
   hasNamedDatabase: boolean;
   warnings: string[];
+  missingEnvVars: string[];
+  initError?: string | null;
 }
 
 export function cleanFirebaseConfigValue(value: string | undefined): string {
-  const trimmed = (value ?? '').trim();
+  let trimmed = (value ?? '').trim();
+  if (
+    (trimmed.startsWith('"') && trimmed.endsWith('"')) ||
+    (trimmed.startsWith("'") && trimmed.endsWith("'"))
+  ) {
+    trimmed = trimmed.slice(1, -1).trim();
+  }
   if (
     !trimmed ||
     trimmed.startsWith('YOUR_') ||
     trimmed === 'your-project-id' ||
     trimmed === 'your-project-id.firebaseapp.com' ||
     trimmed === 'your-project-id.firebasestorage.app' ||
-    trimmed === 'remixed-project-id'
+    trimmed === 'remixed-project-id' ||
+    trimmed === 'undefined' ||
+    trimmed === 'null'
   ) {
     return '';
   }
@@ -69,6 +80,15 @@ function isCompleteClientConfig(cfg: FirebaseClientConfig): boolean {
   return Boolean(cfg.apiKey && cfg.authDomain && cfg.projectId && cfg.appId);
 }
 
+function listMissingRequiredEnvVars(cfg: FirebaseClientConfig): string[] {
+  const missing: string[] = [];
+  if (!cfg.apiKey) missing.push('VITE_FIREBASE_API_KEY');
+  if (!cfg.authDomain) missing.push('VITE_FIREBASE_AUTH_DOMAIN');
+  if (!cfg.projectId) missing.push('VITE_FIREBASE_PROJECT_ID');
+  if (!cfg.appId) missing.push('VITE_FIREBASE_APP_ID');
+  return missing;
+}
+
 function checkConfigConsistency(
   cfg: FirebaseClientConfig,
   warnings: string[]
@@ -95,7 +115,7 @@ function checkConfigConsistency(
  *    matching the provisioned Firestore database, deployed rules, and allowlisted
  *    preview domains).
  * 2. Complete `VITE_FIREBASE_*` environment variables (for standalone deployments
- *    where `firebase-applet-config.json` is intentionally omitted).
+ *    such as Vercel where `firebase-applet-config.json` is intentionally omitted).
  */
 export function resolveFirebaseClientConfig(params: {
   appletConfig?: FirebaseClientConfig;
@@ -120,6 +140,7 @@ export function resolveFirebaseClientConfig(params: {
       source: 'applet-config',
       config: applet,
       warnings,
+      missingEnvVars: [],
     };
   }
 
@@ -130,16 +151,19 @@ export function resolveFirebaseClientConfig(params: {
       source: 'env',
       config: env,
       warnings,
+      missingEnvVars: [],
     };
   }
 
+  const missingEnvVars = listMissingRequiredEnvVars(env);
   return {
     configured: false,
     source: 'none',
     config: {},
     warnings: [
-      'Incomplete Firebase Web SDK configuration: projectId, apiKey, authDomain, and appId are all required.',
+      `Incomplete Firebase Web SDK configuration. Missing environment variables: ${missingEnvVars.join(', ')}.`,
     ],
+    missingEnvVars,
   };
 }
 
@@ -192,7 +216,11 @@ export function formatFirebaseAuthError(
     case 'auth/network-request-failed':
       return 'Network error while contacting Firebase Authentication. Check your internet connection and retry.';
     case 'auth/invalid-api-key':
-      return `The Firebase Web API key for ${projectLabel} was rejected (auth/invalid-api-key). Verify the Web API key and its API restrictions in Google Cloud Console.`;
+      return `The Firebase Web API key for ${projectLabel} was rejected (auth/invalid-api-key). Verify VITE_FIREBASE_API_KEY and its HTTP referrer/API restrictions in Google Cloud Console.`;
+    case 'auth/internal-error':
+      return `Firebase Authentication returned an internal error for ${projectLabel} (auth/internal-error). Verify VITE_FIREBASE_AUTH_DOMAIN matches your Firebase project, Google Sign-In is enabled, and "${hostLabel}" is in Authorized Domains.`;
+    case 'auth/operation-not-supported-in-this-environment':
+      return 'Google sign-in popup is not supported in this browser context. Open the site directly over HTTPS in a standard browser tab and retry.';
     case 'auth/user-disabled':
       return 'This Google account has been disabled in Firebase Authentication.';
     default: {

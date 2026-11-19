@@ -67,15 +67,17 @@ export function sanitizeChatHistory(
   const valid: ChatHistoryTurn[] = [];
   for (const item of rawHistory) {
     if (!item || typeof item !== 'object') continue;
-    const role = (item as { role?: unknown }).role;
+    const rawRole = (item as { role?: unknown }).role;
     const text = (item as { text?: unknown }).text;
-    if (
-      (role === 'user' || role === 'assistant') &&
-      typeof text === 'string' &&
-      text.trim().length > 0
-    ) {
+    const normalizedRole =
+      rawRole === 'user'
+        ? 'user'
+        : rawRole === 'assistant' || rawRole === 'model'
+        ? 'assistant'
+        : null;
+    if (normalizedRole && typeof text === 'string' && text.trim().length > 0) {
       valid.push({
-        role,
+        role: normalizedRole,
         text: text.trim().slice(0, 800),
       });
     }

@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { classifyCpcbAqi, INDIAN_CITIES } from './src/lib/aqi.ts';
+import { cleanFirebaseConfigValue } from './src/lib/firebaseConfig.ts';
 import {
   calculateCommuteImpact,
   EMISSION_FACTORS_KG_PER_KM,
@@ -21,16 +22,16 @@ import {
 import type {
   CityAqiResponse,
   EmissionsInput,
-  FamilyPreferences,
 } from './src/lib/types.ts';
 import {
   DEMO_CHALLENGES,
   DEMO_CONTRIBUTIONS,
 } from './server/adapters/demoData.ts';
+import { isGeminiConfigured } from './server/ai/gemini.ts';
 import {
-  generateAerisRecommendations,
-  isGeminiConfigured,
-} from './server/ai/gemini.ts';
+  processAiChatRequest,
+  type AiChatRequestBody,
+} from './server/ai/handler.ts';
 import {
   detectApproximateIndianCity,
   extractClientIp,
@@ -79,6 +80,7 @@ async function startServer() {
       'Permissions-Policy',
       'camera=(), microphone=(), geolocation=(self)'
     );
+    res.setHeader('Cross-Origin-Opener-Policy', 'same-origin-allow-popups');
     next();
   });
   app.use(express.json({ limit: '256kb' }));
@@ -89,10 +91,10 @@ async function startServer() {
     const firebaseConfigExists =
       fs.existsSync(path.join(__dirname, 'firebase-applet-config.json')) ||
       Boolean(
-        process.env.VITE_FIREBASE_PROJECT_ID?.trim() &&
-          !process.env.VITE_FIREBASE_PROJECT_ID.trim().startsWith('your-') &&
-          process.env.VITE_FIREBASE_API_KEY?.trim() &&
-          !process.env.VITE_FIREBASE_API_KEY.trim().startsWith('YOUR_')
+        cleanFirebaseConfigValue(process.env.VITE_FIREBASE_API_KEY) &&
+          cleanFirebaseConfigValue(process.env.VITE_FIREBASE_AUTH_DOMAIN) &&
+          cleanFirebaseConfigValue(process.env.VITE_FIREBASE_PROJECT_ID) &&
+          cleanFirebaseConfigValue(process.env.VITE_FIREBASE_APP_ID)
       );
     res.json({
       success: true,
@@ -103,6 +105,9 @@ async function startServer() {
         '/api/india/aqi',
         '/api/aqi',
         '/api/location/approximate',
+        '/api/ai/recommendations',
+        '/api/ai/chat',
+        '/api/impact/calculate',
         '/api/community/demo',
       ],
       integrations: {
@@ -260,88 +265,16 @@ async function startServer() {
     }
   });
 
-  // 4. Server-side Gemini AI conversational advisor
+  // 4. Server-side Gemini AI conversational advisor (shared with Vercel serverless routes)
   const handleAiChatRequest = async (
     req: express.Request,
     res: express.Response
   ) => {
-    try {
-      const body = req.body as {
-        city?: string;
-        station?: string;
-        preferences?: FamilyPreferences;
-        question?: string;
-        history?: unknown;
-      };
-      if (!body || typeof body.city !== 'string' || !body.preferences) {
-        res.status(400).json({
-          error: 'Invalid request: city and preferences are required.',
-        });
-        return;
-      }
-
-      const station =
-        typeof body.station === 'string' &&
-        body.station.trim().length > 0 &&
-        body.station.trim().toLowerCase() !== 'all'
-          ? body.station.trim().slice(0, 120)
-          : undefined;
-
-      const simulatedContext = resolveSimulatedCityAqi(body.city, { station });
-      const { sanitizeChatHistory, evaluateAqiVerificationStatus } = await import(
-        './src/lib/aiContext.ts'
-      );
-      const history = sanitizeChatHistory(body.history, 8);
-      const verification = evaluateAqiVerificationStatus(simulatedContext);
-
-      const structured = await generateAerisRecommendations({
-        aqiContext: simulatedContext,
-        preferences: body.preferences,
-        userPrompt:
-          typeof body.question === 'string'
-            ? body.question.slice(0, 1000)
-            : undefined,
-        history,
-      });
-
-      res.json({
-        verifiedContext: {
-          city: simulatedContext.city,
-          station:
-            simulatedContext.selectedStationName ??
-            simulatedContext.stations[0]?.station ??
-            null,
-          primaryAqi: simulatedContext.primaryAqi,
-          category: simulatedContext.category,
-          lastUpdatedIso: simulatedContext.lastUpdatedIso,
-          dataMode: simulatedContext.dataMode,
-          dataSource: simulatedContext.dataSource,
-          dataType: simulatedContext.dataType,
-          isLiveVerified: verification.isLiveVerified,
-          verificationNotice: verification.verificationNotice,
-        },
-        recommendation: structured,
-      });
-    } catch (err) {
-      if (err instanceof UnsupportedCityError) {
-        res.status(404).json({ error: err.message });
-        return;
-      }
-      const message = redactSecrets(
-        err instanceof Error
-          ? err.message
-          : 'Gemini AI recommendation request failed.'
-      );
-      const status =
-        message.includes('not configured') ||
-        message.includes('503') ||
-        message.includes('timed out')
-          ? 503
-          : message.includes('429')
-          ? 429
-          : 500;
-      res.status(status).json({ error: message });
-    }
+    res.setHeader('Cache-Control', 'no-store');
+    const result = await processAiChatRequest(
+      (req.body ?? {}) as AiChatRequestBody
+    );
+    res.status(result.statusCode).json(result.payload);
   };
 
   app.post('/api/ai/recommendations', handleAiChatRequest);

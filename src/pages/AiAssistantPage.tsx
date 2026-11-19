@@ -18,6 +18,7 @@ import {
   evaluateAqiVerificationStatus,
   sanitizeChatHistory,
 } from '../lib/aiContext.ts';
+import { buildApiUrl } from '../lib/apiClient.ts';
 import { formatFreshnessLabel } from '../lib/aqi.ts';
 import type {
   AiRecommendationStructured,
@@ -55,6 +56,7 @@ export function AiAssistantPage({
   const [loading, setLoading] = useState(false);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const threadEndRef = useRef<HTMLDivElement | null>(null);
+  const inFlightRef = useRef(false);
 
   const verification = aqiData ? evaluateAqiVerificationStatus(aqiData) : null;
   const activeStation =
@@ -71,7 +73,8 @@ export function AiAssistantPage({
     options?: { retryErrorId?: string }
   ) => {
     const trimmed = questionText.trim();
-    if (!trimmed || loading) return;
+    if (!trimmed || loading || inFlightRef.current) return;
+    inFlightRef.current = true;
 
     const baseMessages = options?.retryErrorId
       ? messages.filter((m) => m.id !== options.retryErrorId)
@@ -108,7 +111,7 @@ export function AiAssistantPage({
     setLoading(true);
 
     try {
-      const res = await fetch('/api/ai/recommendations', {
+      const res = await fetch(buildApiUrl('/api/ai/recommendations'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         signal: AbortSignal.timeout(45000),
@@ -120,15 +123,35 @@ export function AiAssistantPage({
           history: historyPayload,
         }),
       });
-      const json = (await res.json()) as {
+
+      const rawBody = await res.text();
+      let json: {
         error?: string;
         recommendation?: AiRecommendationStructured;
-      };
+      } | null = null;
+      if (rawBody.trim()) {
+        try {
+          json = JSON.parse(rawBody) as {
+            error?: string;
+            recommendation?: AiRecommendationStructured;
+          };
+        } catch {
+          json = null;
+        }
+      }
 
-      if (!res.ok || !json.recommendation) {
-        throw new Error(
-          json.error || 'Unable to generate Gemini AI recommendations.'
-        );
+      if (!res.ok || !json?.recommendation) {
+        const fallbackMsg =
+          res.status === 404
+            ? 'AI endpoint (/api/ai/recommendations) was not found (HTTP 404). Redeploy the latest Vercel serverless functions.'
+            : res.status === 503
+            ? 'Gemini AI service is currently unavailable (HTTP 503). Verify GEMINI_API_KEY is configured in your server environment variables.'
+            : res.status === 429
+            ? 'Gemini AI rate limit or quota reached (HTTP 429). Please wait a moment and retry.'
+            : res.status === 504
+            ? 'The AI serverless function timed out (HTTP 504). Please retry.'
+            : `Unable to generate Gemini AI recommendations (HTTP ${res.status}).`;
+        throw new Error(json?.error || fallbackMsg);
       }
 
       const assistantMsg: ChatMessage = {
@@ -159,6 +182,7 @@ export function AiAssistantPage({
       };
       setMessages((prev) => [...prev, errMsg]);
     } finally {
+      inFlightRef.current = false;
       setLoading(false);
     }
   };
@@ -507,6 +531,10 @@ export function AiAssistantPage({
                       </p>
                     </div>
                   </motion.article>
+                ) : msg.text ? (
+                  <div className="max-w-xl rounded-xl bg-[#070D1B] border border-cyan-500/20 px-4 py-3 text-sm text-slate-100 leading-relaxed">
+                    {msg.text}
+                  </div>
                 ) : null}
               </div>
             ))

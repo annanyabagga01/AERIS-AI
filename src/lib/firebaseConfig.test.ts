@@ -66,6 +66,10 @@ test('never mixes partial env fields with partial applet fields across projects'
   });
   assert.equal(resolved.configured, false);
   assert.equal(resolved.source, 'none');
+  assert.deepEqual(resolved.missingEnvVars, [
+    'VITE_FIREBASE_AUTH_DOMAIN',
+    'VITE_FIREBASE_PROJECT_ID',
+  ]);
 });
 
 test('detects authDomain mismatch against projectId', () => {
@@ -79,7 +83,7 @@ test('detects authDomain mismatch against projectId', () => {
   assert.ok(resolved.warnings.some((w) => w.includes('does not match projectId')));
 });
 
-test('formats auth/configuration-not-found, auth/operation-not-allowed, and auth/unauthorized-domain with actionable steps', () => {
+test('formats auth/configuration-not-found, auth/operation-not-allowed, auth/unauthorized-domain, and auth/internal-error with actionable steps', () => {
   const notFound = formatFirebaseAuthError(
     { code: 'auth/configuration-not-found', message: 'Firebase: Error (auth/configuration-not-found).' },
     { projectId: 'resonant-reference-1c9s2' }
@@ -97,10 +101,17 @@ test('formats auth/configuration-not-found, auth/operation-not-allowed, and auth
 
   const unauthDomain = formatFirebaseAuthError(
     { code: 'auth/unauthorized-domain' },
-    { projectId: 'aeris-ai-967a7', currentHost: 'example.run.app' }
+    { projectId: 'aeris-ai-967a7', currentHost: 'aeris-ai-alpha.vercel.app' }
   );
   assert.match(unauthDomain, /Authorized Domains/i);
-  assert.match(unauthDomain, /example\.run\.app/i);
+  assert.match(unauthDomain, /aeris-ai-alpha\.vercel\.app/i);
+
+  const internalErr = formatFirebaseAuthError(
+    { code: 'auth/internal-error' },
+    { projectId: 'aeris-ai-967a7', currentHost: 'aeris-ai-alpha.vercel.app' }
+  );
+  assert.match(internalErr, /auth\/internal-error/i);
+  assert.match(internalErr, /VITE_FIREBASE_AUTH_DOMAIN/i);
 });
 
 test('formatFirestoreUiError never leaks authInfo email from structured Firestore errors', () => {
@@ -117,3 +128,34 @@ test('formatFirestoreUiError never leaks authInfo email from structured Firestor
   assert.doesNotMatch(safe, /private\.user@example\.com/i);
   assert.match(safe, /Firestore access denied/i);
 });
+
+test('strips accidental wrapping quotes from VITE_FIREBASE_* env values and rejects literal undefined/null', () => {
+  const resolved = resolveFirebaseClientConfig({
+    appletConfig: {},
+    envConfig: {
+      projectId: '"aeris-ai-967a7"',
+      appId: "'1:900141604250:web:90bf460446bdec0acc2e23'",
+      apiKey: ' "AIzaSyFakeEnvKeyExample0987654321098" ',
+      authDomain: '"aeris-ai-967a7.firebaseapp.com"',
+      firestoreDatabaseId: '"(default)"',
+    },
+  });
+  assert.equal(resolved.configured, true);
+  assert.equal(resolved.config.projectId, 'aeris-ai-967a7');
+  assert.equal(resolved.config.authDomain, 'aeris-ai-967a7.firebaseapp.com');
+  assert.equal(resolved.config.apiKey, 'AIzaSyFakeEnvKeyExample0987654321098');
+  assert.equal(resolved.config.firestoreDatabaseId, undefined);
+
+  const bad = resolveFirebaseClientConfig({
+    appletConfig: {},
+    envConfig: {
+      projectId: 'undefined',
+      appId: 'null',
+      apiKey: 'YOUR_FIREBASE_WEB_API_KEY',
+      authDomain: 'your-project-id.firebaseapp.com',
+    },
+  });
+  assert.equal(bad.configured, false);
+  assert.equal(bad.missingEnvVars.length, 4);
+});
+

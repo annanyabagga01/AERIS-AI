@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Calculator, ShieldCheck, ShieldAlert } from 'lucide-react';
+import { buildApiUrl } from '../lib/apiClient.ts';
 import {
   calculateCommuteImpact,
   EMISSION_FACTORS_KG_PER_KM,
@@ -43,7 +44,7 @@ export function EcoAlternativesPage({
     if (e) e.preventDefault();
     setCalculating(true);
     try {
-      const res = await fetch('/api/impact/calculate', {
+      const res = await fetch(buildApiUrl('/api/impact/calculate'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
