@@ -15,10 +15,12 @@ import {
 } from 'lucide-react';
 import { AnimatePresence, motion } from 'motion/react';
 import type { User } from 'firebase/auth';
+import { ChatbotErrorBoundary } from './components/ChatbotErrorBoundary.tsx';
 import { ErrorBoundary } from './components/ErrorBoundary.tsx';
 import { buildApiUrl } from './lib/apiClient.ts';
 import { classifyCpcbAqi } from './lib/aqi.ts';
 import {
+  auth,
   completeGoogleRedirectSignIn,
   isFirebaseConfigured,
   subscribeAuth,
@@ -207,11 +209,21 @@ function AerisShell() {
   );
 
   const firebaseConfigured = isFirebaseConfigured();
-  const [authUser, setAuthUser] = useState<User | null>(null);
+  const [authUser, setAuthUser] = useState<User | null>(
+    () => auth?.currentUser ?? null
+  );
   const [authReady, setAuthReady] = useState<boolean>(!firebaseConfigured);
   const [authRedirectError, setAuthRedirectError] = useState<string | null>(
     null
   );
+
+  const handleAuthUserChange = useCallback((nextUser: User | null) => {
+    setAuthUser(nextUser);
+    setAuthReady(true);
+    if (nextUser) {
+      setAuthRedirectError(null);
+    }
+  }, []);
 
   useEffect(() => {
     if (!firebaseConfigured) {
@@ -219,16 +231,48 @@ function AerisShell() {
       return () => {};
     }
     let active = true;
+    let authEventReceived = false;
+    let redirectSettled = false;
+    let resolvedUser: User | null = auth?.currentUser ?? null;
+
+    const finalizeIfReady = () => {
+      if (!active) return;
+      if (resolvedUser || (authEventReceived && redirectSettled)) {
+        setAuthReady(true);
+      }
+    };
+
     void completeGoogleRedirectSignIn().then((res) => {
       if (!active) return;
-      if (res.user) setAuthUser(res.user);
-      if (res.error) setAuthRedirectError(res.error);
+      redirectSettled = true;
+      if (res.user) {
+        resolvedUser = res.user;
+        setAuthUser(res.user);
+        setAuthRedirectError(null);
+      }
+      if (res.error) {
+        setAuthRedirectError(res.error);
+      }
+      finalizeIfReady();
     });
+
     const unsub = subscribeAuth((nextUser) => {
       if (!active) return;
-      setAuthUser(nextUser);
-      setAuthReady(true);
+      authEventReceived = true;
+      const effectiveUser = nextUser ?? auth?.currentUser ?? null;
+      // Avoid overwriting a freshly resolved redirect user with an early cached null snapshot
+      if (!effectiveUser && resolvedUser && !redirectSettled) {
+        finalizeIfReady();
+        return;
+      }
+      resolvedUser = effectiveUser;
+      setAuthUser(effectiveUser);
+      if (effectiveUser) {
+        setAuthRedirectError(null);
+      }
+      finalizeIfReady();
     });
+
     return () => {
       active = false;
       unsub();
@@ -622,11 +666,13 @@ function AerisShell() {
                 />
               )}
               {activeNav === 'ai' && (
-                <AiAssistantPage
-                  aqiData={aqiData}
-                  stationId={selectedStation}
-                  preferences={preferences}
-                />
+                <ChatbotErrorBoundary resetKey={preferences.city}>
+                  <AiAssistantPage
+                    aqiData={aqiData}
+                    stationId={selectedStation}
+                    preferences={preferences}
+                  />
+                </ChatbotErrorBoundary>
               )}
               {activeNav === 'indoor' && (
                 <IndoorOptimizerPage
@@ -674,6 +720,7 @@ function AerisShell() {
                   authUser={authUser}
                   authReady={authReady}
                   authRedirectError={authRedirectError}
+                  onAuthUserChange={handleAuthUserChange}
                 />
               )}
               {activeNav === 'settings' && (

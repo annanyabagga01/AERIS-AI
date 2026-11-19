@@ -124,9 +124,15 @@ test('formatFirestoreUiError never leaks authInfo email from structured Firestor
       email: 'private.user@example.com',
     },
   });
-  const safe = formatFirestoreUiError(new Error(rawStructured));
+  const safe = formatFirestoreUiError(new Error(rawStructured), {
+    projectId: 'aeris-ai-967a7',
+    databaseId: 'default',
+  });
   assert.doesNotMatch(safe, /private\.user@example\.com/i);
   assert.match(safe, /Firestore access denied/i);
+  assert.match(safe, /aeris-ai-967a7/i);
+  assert.match(safe, /databases\/default\/rules/i);
+  assert.match(safe, /firestore\.rules/i);
 });
 
 test('strips accidental wrapping quotes from VITE_FIREBASE_* env values and rejects literal undefined/null', () => {

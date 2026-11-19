@@ -14,12 +14,14 @@ import {
   Sparkles,
   Train,
 } from 'lucide-react';
+import { useChatbotError } from '../components/ChatbotErrorBoundary.tsx';
 import {
   evaluateAqiVerificationStatus,
   sanitizeChatHistory,
 } from '../lib/aiContext.ts';
 import { buildApiUrl } from '../lib/apiClient.ts';
 import { formatFreshnessLabel } from '../lib/aqi.ts';
+import { classifyChatbotError } from '../lib/chatbotErrors.ts';
 import type {
   AiRecommendationStructured,
   ChatMessage,
@@ -57,6 +59,7 @@ export function AiAssistantPage({
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const threadEndRef = useRef<HTMLDivElement | null>(null);
   const inFlightRef = useRef(false);
+  const { reportError, clearError } = useChatbotError();
 
   const verification = aqiData ? evaluateAqiVerificationStatus(aqiData) : null;
   const activeStation =
@@ -109,8 +112,17 @@ export function AiAssistantPage({
     }
     setPrompt('');
     setLoading(true);
+    clearError();
+
+    let responseStatus: number | undefined;
+    let serverErrorMessage: string | null = null;
+    const errorMsgId = `e-${Date.now()}`;
 
     try {
+      if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+        throw new Error('Failed to fetch: browser is offline.');
+      }
+
       const res = await fetch(buildApiUrl('/api/ai/recommendations'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -123,6 +135,7 @@ export function AiAssistantPage({
           history: historyPayload,
         }),
       });
+      responseStatus = res.status;
 
       const rawBody = await res.text();
       let json: {
@@ -141,17 +154,12 @@ export function AiAssistantPage({
       }
 
       if (!res.ok || !json?.recommendation) {
-        const fallbackMsg =
-          res.status === 404
-            ? 'AI endpoint (/api/ai/recommendations) was not found (HTTP 404). Redeploy the latest Vercel serverless functions.'
-            : res.status === 503
-            ? 'Gemini AI service is currently unavailable (HTTP 503). Verify GEMINI_API_KEY is configured in your server environment variables.'
-            : res.status === 429
-            ? 'Gemini AI rate limit or quota reached (HTTP 429). Please wait a moment and retry.'
-            : res.status === 504
-            ? 'The AI serverless function timed out (HTTP 504). Please retry.'
-            : `Unable to generate Gemini AI recommendations (HTTP ${res.status}).`;
-        throw new Error(json?.error || fallbackMsg);
+        serverErrorMessage = json?.error ?? null;
+        const descriptor = classifyChatbotError({
+          httpStatus: res.status,
+          serverMessage: serverErrorMessage,
+        });
+        throw new Error(descriptor.message);
       }
 
       const assistantMsg: ChatMessage = {
@@ -166,18 +174,21 @@ export function AiAssistantPage({
         return next.length > 16 ? next.slice(next.length - 16) : next;
       });
     } catch (err) {
-      const message =
-        err instanceof Error &&
-        (err.name === 'TimeoutError' || err.name === 'AbortError')
-          ? 'Request timed out while waiting for Gemini AI. Please click Retry.'
-          : err instanceof Error
-          ? err.message
-          : 'Request failed.';
+      const descriptor = classifyChatbotError({
+        error: err,
+        httpStatus: responseStatus,
+        serverMessage: serverErrorMessage,
+        isOffline:
+          typeof navigator !== 'undefined' && navigator.onLine === false,
+      });
+      reportError(descriptor, () => {
+        void askGemini(trimmed, { retryErrorId: errorMsgId });
+      });
       const errMsg: ChatMessage = {
-        id: `e-${Date.now()}`,
+        id: errorMsgId,
         role: 'assistant',
-        text: 'Gemini AI request could not be completed.',
-        error: message,
+        text: descriptor.title,
+        error: descriptor.message,
         timestampIso: new Date().toISOString(),
       };
       setMessages((prev) => [...prev, errMsg]);
@@ -217,7 +228,10 @@ export function AiAssistantPage({
             {messages.length > 0 && (
               <button
                 type="button"
-                onClick={() => setMessages([])}
+                onClick={() => {
+                  clearError();
+                  setMessages([]);
+                }}
                 disabled={loading}
                 className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-slate-700 text-xs text-slate-300 hover:bg-slate-800/80 transition-colors"
               >

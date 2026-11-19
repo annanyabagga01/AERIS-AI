@@ -108,6 +108,7 @@ if (resolvedFirebase.configured) {
 
     try {
       authInstance = getAuth(app);
+      authInstance.useDeviceLanguage();
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       firebaseInitError =
@@ -148,12 +149,19 @@ export function isFirebaseConfigured(): boolean {
   );
 }
 
+export function getExpectedOAuthRedirectUri(): string | null {
+  return firebaseConfig.authDomain
+    ? `https://${firebaseConfig.authDomain}/__/auth/handler`
+    : null;
+}
+
 export function getFirebasePublicStatus(): FirebasePublicStatus {
   return {
     configured: isFirebaseConfigured(),
     source: resolvedFirebase.source,
     projectId: firebaseConfig.projectId || null,
     authDomain: firebaseConfig.authDomain || null,
+    databaseId: firebaseConfig.firestoreDatabaseId || '(default)',
     hasNamedDatabase: Boolean(firebaseConfig.firestoreDatabaseId),
     warnings: [...resolvedFirebase.warnings],
     missingEnvVars: [...resolvedFirebase.missingEnvVars],
@@ -169,6 +177,9 @@ if (typeof console !== 'undefined') {
     source: resolvedFirebase.source,
     projectId: firebaseConfig.projectId || null,
     authDomain: firebaseConfig.authDomain || null,
+    databaseId: firebaseConfig.firestoreDatabaseId || '(default)',
+    expectedOAuthRedirectUri: getExpectedOAuthRedirectUri(),
+    currentOrigin: typeof window !== 'undefined' ? window.location.origin : null,
     appInitialized: Boolean(app),
     authInitialized: Boolean(auth),
     authAppName: auth?.app?.name ?? null,
@@ -306,7 +317,19 @@ export function subscribeAuth(cb: (user: User | null) => void): Unsubscribe {
     return () => {};
   }
   void ensureAuthPersistence();
-  return onAuthStateChanged(auth, cb);
+  return onAuthStateChanged(
+    auth,
+    (user) => {
+      cb(user);
+    },
+    (error) => {
+      console.error(
+        '[AERIS Firebase] onAuthStateChanged() listener error:',
+        error instanceof Error ? error.message : String(error)
+      );
+      cb(null);
+    }
+  );
 }
 
 /**
@@ -323,12 +346,29 @@ export async function completeGoogleRedirectSignIn(): Promise<{
   try {
     await ensureAuthPersistence();
     const result = await getRedirectResult(auth);
+    if (result?.user) {
+      console.info('[AERIS Firebase] getRedirectResult() succeeded:', {
+        uidPresent: Boolean(result.user.uid),
+        emailVerified: Boolean(result.user.emailVerified),
+        providerId: result.providerId ?? googleProvider?.providerId ?? 'google.com',
+      });
+    }
     return { user: result?.user ?? null, error: null };
   } catch (error) {
-    console.error(
-      '[AERIS Firebase] getRedirectResult() failed during startup:',
-      error instanceof Error ? error.message : String(error)
-    );
+    const errorCode =
+      error && typeof error === 'object' && 'code' in error
+        ? String((error as { code?: unknown }).code ?? '')
+        : '';
+    console.error('[AERIS Firebase] getRedirectResult() failed during startup:', {
+      code: errorCode || 'unknown',
+      name: error instanceof Error ? error.name : typeof error,
+      message: error instanceof Error ? error.message : String(error),
+      projectId: firebaseConfig.projectId || null,
+      authDomain: firebaseConfig.authDomain || null,
+      expectedRedirectUri: getExpectedOAuthRedirectUri(),
+      currentHost:
+        typeof window !== 'undefined' ? window.location.hostname : null,
+    });
     const currentHost =
       typeof window !== 'undefined' ? window.location.hostname : null;
     return {
@@ -372,43 +412,91 @@ export async function signInWithGoogle(): Promise<{
   await ensureAuthPersistence();
   try {
     const cred = await signInWithPopup(auth, googleProvider);
+    console.info('[AERIS Firebase] signInWithPopup() succeeded:', {
+      uidPresent: Boolean(cred.user?.uid),
+      emailVerified: Boolean(cred.user?.emailVerified),
+      providerId: cred.providerId ?? googleProvider.providerId,
+    });
     return { user: cred.user, redirected: false };
   } catch (error) {
     const errorCode =
       error && typeof error === 'object' && 'code' in error
         ? String((error as { code?: unknown }).code ?? '')
         : '';
+    const currentHost =
+      typeof window !== 'undefined' ? window.location.hostname : null;
+    const topLevelWindow = isTopLevelBrowserWindow();
 
-    console.error('[AERIS Firebase] signInWithPopup() failed:', {
+    const isHandledAuthFlowWarning =
+      errorCode === 'auth/unauthorized-domain' ||
+      errorCode === 'auth/popup-closed-by-user' ||
+      errorCode === 'auth/cancelled-popup-request' ||
+      errorCode === 'auth/popup-blocked';
+
+    const logDetails = {
       code: errorCode || 'unknown',
+      name: error instanceof Error ? error.name : typeof error,
+      message: formatFirebaseAuthError(error, {
+        projectId: firebaseConfig.projectId || null,
+        authDomain: firebaseConfig.authDomain || null,
+        currentHost,
+      }),
+      projectId: firebaseConfig.projectId || null,
       authDomain: firebaseConfig.authDomain || null,
-      currentHost:
-        typeof window !== 'undefined' ? window.location.hostname : null,
-    });
+      expectedRedirectUri: getExpectedOAuthRedirectUri(),
+      currentHost,
+      isTopLevelWindow: topLevelWindow,
+    };
+
+    if (isHandledAuthFlowWarning) {
+      console.warn('[AERIS Firebase] signInWithPopup() notice:', logDetails);
+    } else {
+      console.error('[AERIS Firebase] signInWithPopup() failed:', logDetails);
+    }
 
     // Fall back to redirect only on top-level windows (e.g. mobile browsers on Vercel)
     // when popups are blocked; keep popup-only inside iframes.
     if (
       (errorCode === 'auth/popup-blocked' ||
         errorCode === 'auth/operation-not-supported-in-this-environment') &&
-      isTopLevelBrowserWindow()
+      topLevelWindow
     ) {
       console.info(
-        '[AERIS Firebase] Falling back to signInWithRedirect() on top-level window.'
+        '[AERIS Firebase] Falling back to signInWithRedirect() on top-level window.',
+        { expectedRedirectUri: getExpectedOAuthRedirectUri(), currentHost }
       );
-      await signInWithRedirect(auth, googleProvider);
-      return { user: null, redirected: true };
+      try {
+        await signInWithRedirect(auth, googleProvider);
+        return { user: null, redirected: true };
+      } catch (redirectError) {
+        const redirectCode =
+          redirectError &&
+          typeof redirectError === 'object' &&
+          'code' in redirectError
+            ? String((redirectError as { code?: unknown }).code ?? '')
+            : '';
+        console.error('[AERIS Firebase] signInWithRedirect() fallback failed:', {
+          code: redirectCode || 'unknown',
+          name:
+            redirectError instanceof Error
+              ? redirectError.name
+              : typeof redirectError,
+          projectId: firebaseConfig.projectId || null,
+          authDomain: firebaseConfig.authDomain || null,
+          expectedRedirectUri: getExpectedOAuthRedirectUri(),
+          currentHost,
+        });
+        throw new Error(
+          formatFirebaseAuthError(redirectError, {
+            projectId: firebaseConfig.projectId || null,
+            authDomain: firebaseConfig.authDomain || null,
+            currentHost,
+          })
+        );
+      }
     }
 
-    const currentHost =
-      typeof window !== 'undefined' ? window.location.hostname : null;
-    throw new Error(
-      formatFirebaseAuthError(error, {
-        projectId: firebaseConfig.projectId || null,
-        authDomain: firebaseConfig.authDomain || null,
-        currentHost,
-      })
-    );
+    throw new Error(logDetails.message);
   }
 }
 
@@ -435,12 +523,12 @@ export function subscribeLiveContributions(
   onData: (items: CommunityContribution[]) => void,
   onError: (err: Error) => void
 ): Unsubscribe {
-  if (!db || !auth) {
+  const currentUid = auth?.currentUser?.uid;
+  if (!db || !currentUid) {
     onData([]);
     return () => {};
   }
   const path = 'community_contributions';
-  const currentUid = auth.currentUser?.uid;
   const q = query(
     collection(db, path),
     where('optInPublic', '==', true),
@@ -490,7 +578,8 @@ export function subscribeLiveChallenges(
   onData: (challenges: CommunityChallenge[]) => void,
   onError: (err: Error) => void
 ): Unsubscribe {
-  if (!db) {
+  const currentUid = auth?.currentUser?.uid;
+  if (!db || !currentUid) {
     onData([]);
     return () => {};
   }

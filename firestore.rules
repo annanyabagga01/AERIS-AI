@@ -178,8 +178,8 @@ service cloud.firestore {
 
     // Opt-in anonymous community contributions
     match /community_contributions/{contributionId} {
-      allow get: if isSignedIn() && isValidId(contributionId) && (existing().optInPublic == true || existing().authorUid == request.auth.uid);
-      allow list: if isSignedIn() && existing().optInPublic == true;
+      allow get: if isSignedIn() && isValidId(contributionId) && (resource.data.optInPublic == true || resource.data.authorUid == request.auth.uid);
+      allow list: if isSignedIn() && resource.data.optInPublic == true;
       allow create: if isVerified() &&
         isValidId(contributionId) &&
         isValidContribution(incoming()) &&
@@ -191,8 +191,8 @@ service cloud.firestore {
 
     // Community challenges
     match /community_challenges/{challengeId} {
-      allow get: if isSignedIn() && isValidId(challengeId) && (existing().isActive == true || isAdmin());
-      allow list: if isSignedIn() && existing().isActive == true;
+      allow get: if isSignedIn() && isValidId(challengeId) && (resource.data.isActive == true || isAdmin());
+      allow list: if isSignedIn() && resource.data.isActive == true;
       allow create: if isAdmin() &&
         isValidId(challengeId) &&
         isValidChallenge(incoming()) &&
@@ -207,8 +207,8 @@ service cloud.firestore {
 
     // Challenge participation records
     match /challenge_participants/{participantId} {
-      allow get: if isSignedIn() && isValidId(participantId) && (existing().userId == request.auth.uid || existing().optInPublic == true);
-      allow list: if isSignedIn() && existing().optInPublic == true;
+      allow get: if isSignedIn() && isValidId(participantId) && (resource.data.userId == request.auth.uid || resource.data.optInPublic == true);
+      allow list: if isSignedIn() && resource.data.optInPublic == true;
       allow create: if isVerified() &&
         isValidId(participantId) &&
         isValidParticipant(incoming()) &&

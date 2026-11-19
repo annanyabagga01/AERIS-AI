@@ -51,6 +51,7 @@ interface CommunityHubPageProps {
   authUser?: User | null;
   authReady?: boolean;
   authRedirectError?: string | null;
+  onAuthUserChange?: (nextUser: User | null) => void;
 }
 
 const DEMO_PARTICIPANTS: ChallengeParticipantRecord[] = [
@@ -66,6 +67,7 @@ export function CommunityHubPage({
   authUser,
   authReady: authReadyProp,
   authRedirectError,
+  onAuthUserChange,
 }: CommunityHubPageProps) {
   const firebaseReady = isFirebaseConfigured();
   const firebaseStatus = getFirebasePublicStatus();
@@ -160,7 +162,13 @@ export function CommunityHubPage({
         setLiveContributions(items);
         setErrorMessage(null);
       },
-      (err) => setErrorMessage(formatFirestoreUiError(err))
+      (err) =>
+        setErrorMessage(
+          formatFirestoreUiError(err, {
+            projectId: firebaseStatus.projectId,
+            databaseId: firebaseStatus.databaseId,
+          })
+        )
     );
 
     const unsubChallenges = subscribeLiveChallenges(
@@ -172,7 +180,13 @@ export function CommunityHubPage({
 
     const unsubEnroll = subscribeChallengeParticipants(
       (records) => setLiveParticipants(records),
-      (err) => setErrorMessage(formatFirestoreUiError(err))
+      (err) =>
+        setErrorMessage(
+          formatFirestoreUiError(err, {
+            projectId: firebaseStatus.projectId,
+            databaseId: firebaseStatus.databaseId,
+          })
+        )
     );
 
     return () => {
@@ -180,7 +194,7 @@ export function CommunityHubPage({
       unsubChallenges();
       unsubEnroll();
     };
-  }, [isLiveOptIn]);
+  }, [isLiveOptIn, firebaseStatus.projectId, firebaseStatus.databaseId]);
 
   // Strict data separation: never mix Demo rows into Live mode
   const activeChallenges = useMemo(() => {
@@ -292,6 +306,14 @@ export function CommunityHubPage({
         setStatusMessage('Redirecting to Google Sign-In...');
         return;
       }
+      if (result.user) {
+        if (onAuthUserChange) {
+          onAuthUserChange(result.user);
+        } else {
+          setLocalUser(result.user);
+          setLocalAuthReady(true);
+        }
+      }
       setStatusMessage(
         preferences.communityOptIn
           ? `Signed in with Google. Connected to live Firestore anonymously as "${preferences.anonymousHandle}".`
@@ -314,6 +336,11 @@ export function CommunityHubPage({
     setAuthAction('signing_out');
     try {
       await signOutUser();
+      if (onAuthUserChange) {
+        onAuthUserChange(null);
+      } else {
+        setLocalUser(null);
+      }
       setStatusMessage(
         'Signed out. Live Firestore sync disconnected; viewing Demo Community Preview.'
       );
@@ -368,7 +395,12 @@ export function CommunityHubPage({
         setStatusMessage('Enrolled anonymously in community challenge.');
       }
     } catch (err) {
-      setErrorMessage(formatFirestoreUiError(err));
+      setErrorMessage(
+        formatFirestoreUiError(err, {
+          projectId: firebaseStatus.projectId,
+          databaseId: firebaseStatus.databaseId,
+        })
+      );
     }
   };
 
@@ -379,7 +411,12 @@ export function CommunityHubPage({
       await seedChallengesToFirestore(demoChallenges);
       setStatusMessage('Published seasonal challenges to Firestore.');
     } catch (err) {
-      setErrorMessage(formatFirestoreUiError(err));
+      setErrorMessage(
+        formatFirestoreUiError(err, {
+          projectId: firebaseStatus.projectId,
+          databaseId: firebaseStatus.databaseId,
+        })
+      );
     }
   };
 
@@ -426,7 +463,12 @@ export function CommunityHubPage({
         'Anonymous action published to live Firestore community hub.'
       );
     } catch (err) {
-      setErrorMessage(formatFirestoreUiError(err));
+      setErrorMessage(
+        formatFirestoreUiError(err, {
+          projectId: firebaseStatus.projectId,
+          databaseId: firebaseStatus.databaseId,
+        })
+      );
     } finally {
       setSubmitting(false);
     }
@@ -438,7 +480,12 @@ export function CommunityHubPage({
       await deleteOptInContribution(id);
       setStatusMessage('Removed your contribution from Firestore.');
     } catch (err) {
-      setErrorMessage(formatFirestoreUiError(err));
+      setErrorMessage(
+        formatFirestoreUiError(err, {
+          projectId: firebaseStatus.projectId,
+          databaseId: firebaseStatus.databaseId,
+        })
+      );
     }
   };
 

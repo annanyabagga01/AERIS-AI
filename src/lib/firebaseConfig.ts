@@ -24,6 +24,7 @@ export interface FirebasePublicStatus {
   source: FirebaseConfigSource;
   projectId: string | null;
   authDomain: string | null;
+  databaseId: string;
   hasNamedDatabase: boolean;
   warnings: string[];
   missingEnvVars: string[];
@@ -240,7 +241,10 @@ export function formatFirebaseAuthError(
  * diagnostic JSON (which may include `authInfo.email` for console debugging)
  * is never displayed on screen.
  */
-export function formatFirestoreUiError(error: unknown): string {
+export function formatFirestoreUiError(
+  error: unknown,
+  context?: { projectId?: string | null; databaseId?: string | null }
+): string {
   const raw =
     error instanceof Error
       ? error.message
@@ -249,10 +253,14 @@ export function formatFirestoreUiError(error: unknown): string {
       : 'Unable to sync with Firestore right now.';
 
   let underlying = raw;
+  let operationType: string | undefined;
   try {
     const parsed = JSON.parse(raw) as { error?: string; operationType?: string };
     if (parsed && typeof parsed.error === 'string') {
       underlying = parsed.error;
+    }
+    if (parsed && typeof parsed.operationType === 'string') {
+      operationType = parsed.operationType.toLowerCase();
     }
   } catch {
     // Plain error message
@@ -263,7 +271,24 @@ export function formatFirestoreUiError(error: unknown): string {
     lower.includes('missing or insufficient permissions') ||
     lower.includes('permission-denied')
   ) {
-    return 'Firestore access denied by security rules. Confirm you are signed in with a verified Google account, opted in to the live community, and using a valid anonymous handle.';
+    const projectLabel = context?.projectId
+      ? `project "${context.projectId}"`
+      : 'your Firebase project';
+    const dbLabel = context?.databaseId || '(default)';
+    const rulesUrl = context?.projectId
+      ? `https://console.firebase.google.com/project/${encodeURIComponent(
+          context.projectId
+        )}/firestore/databases/${encodeURIComponent(dbLabel)}/rules`
+      : null;
+
+    if (operationType === 'list' || operationType === 'get') {
+      return rulesUrl
+        ? `Firestore access denied by security rules on database "${dbLabel}" in ${projectLabel}. Publish the repository's firestore.rules at ${rulesUrl} and reload.`
+        : `Firestore access denied by security rules on database "${dbLabel}" in ${projectLabel}. Publish the repository's firestore.rules in Firebase Console → Firestore Database → Rules for database "${dbLabel}" and reload.`;
+    }
+    return rulesUrl
+      ? `Firestore access denied by security rules on database "${dbLabel}" in ${projectLabel}. Ensure firestore.rules is published at ${rulesUrl}, and confirm you are signed in with a verified Google account and using a valid anonymous handle.`
+      : `Firestore access denied by security rules on database "${dbLabel}" in ${projectLabel}. Confirm firestore.rules is published in Firebase Console, and that you are signed in with a verified Google account and using a valid anonymous handle.`;
   }
   if (lower.includes('quota exceeded')) {
     return 'Firestore free-tier daily quota was exceeded. Quota resets tomorrow; Demo Community Preview remains available.';
