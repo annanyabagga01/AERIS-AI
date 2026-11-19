@@ -31,6 +31,21 @@ export interface FirebasePublicStatus {
   initError?: string | null;
 }
 
+const MASKED_BULLET_REGEX = /[\u2022\u25CF\u25AA\u25E6\u2024\u2027\u2219]/;
+const MASKED_ASTERISK_RUN_REGEX = /^\*{4,}$/;
+const VALID_ASCII_HOSTNAME_REGEX =
+  /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+$/i;
+const VALID_FIREBASE_PROJECT_ID_REGEX = /^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$/i;
+
+export function hasMaskedCharacters(value: string | undefined): boolean {
+  if (typeof value !== 'string') return false;
+  const trimmed = value.trim().replace(/^["']|["']$/g, '').trim();
+  if (!trimmed) return false;
+  return (
+    MASKED_BULLET_REGEX.test(trimmed) || MASKED_ASTERISK_RUN_REGEX.test(trimmed)
+  );
+}
+
 export function cleanFirebaseConfigValue(value: string | undefined): string {
   let trimmed = (value ?? '').trim();
   if (
@@ -41,6 +56,7 @@ export function cleanFirebaseConfigValue(value: string | undefined): string {
   }
   if (
     !trimmed ||
+    hasMaskedCharacters(trimmed) ||
     trimmed.startsWith('YOUR_') ||
     trimmed === 'your-project-id' ||
     trimmed === 'your-project-id.firebaseapp.com' ||
@@ -52,6 +68,37 @@ export function cleanFirebaseConfigValue(value: string | undefined): string {
     return '';
   }
   return trimmed;
+}
+
+export function cleanFirebaseAuthDomain(value: string | undefined): string {
+  let cleaned = cleanFirebaseConfigValue(value);
+  if (!cleaned) return '';
+
+  // Strip accidental protocol or trailing path/slash if pasted as a full URL
+  cleaned = cleaned
+    .replace(/^https?:\/\//i, '')
+    .replace(/\/.*$/, '')
+    .trim()
+    .toLowerCase();
+
+  // Reject Punycode (xn--) or any non-ASCII hostname so Firebase never opens a broken xn-- handler URL
+  if (
+    !cleaned ||
+    cleaned.startsWith('xn--') ||
+    cleaned.includes('.xn--') ||
+    !VALID_ASCII_HOSTNAME_REGEX.test(cleaned)
+  ) {
+    return '';
+  }
+  return cleaned;
+}
+
+function cleanFirebaseProjectId(value: string | undefined): string {
+  const cleaned = cleanFirebaseConfigValue(value);
+  if (!cleaned || !VALID_FIREBASE_PROJECT_ID_REGEX.test(cleaned)) {
+    return '';
+  }
+  return cleaned;
 }
 
 function normalizeDatabaseId(value: string | undefined): string | undefined {
@@ -66,8 +113,8 @@ function sanitizeClientConfig(raw?: FirebaseClientConfig): FirebaseClientConfig 
   if (!raw) return {};
   const sanitized: FirebaseClientConfig = {
     apiKey: cleanFirebaseConfigValue(raw.apiKey),
-    authDomain: cleanFirebaseConfigValue(raw.authDomain),
-    projectId: cleanFirebaseConfigValue(raw.projectId),
+    authDomain: cleanFirebaseAuthDomain(raw.authDomain),
+    projectId: cleanFirebaseProjectId(raw.projectId),
     storageBucket: cleanFirebaseConfigValue(raw.storageBucket),
     messagingSenderId: cleanFirebaseConfigValue(raw.messagingSenderId),
     appId: cleanFirebaseConfigValue(raw.appId),
@@ -75,6 +122,35 @@ function sanitizeClientConfig(raw?: FirebaseClientConfig): FirebaseClientConfig 
     firestoreDatabaseId: normalizeDatabaseId(raw.firestoreDatabaseId),
   };
   return sanitized;
+}
+
+function listMaskedOrMalformedEnvVars(
+  raw?: FirebaseClientConfig
+): { masked: string[]; invalidAuthDomain: boolean } {
+  if (!raw) return { masked: [], invalidAuthDomain: false };
+  const masked: string[] = [];
+  const entries: Array<[string, string | undefined]> = [
+    ['VITE_FIREBASE_API_KEY', raw.apiKey],
+    ['VITE_FIREBASE_AUTH_DOMAIN', raw.authDomain],
+    ['VITE_FIREBASE_PROJECT_ID', raw.projectId],
+    ['VITE_FIREBASE_STORAGE_BUCKET', raw.storageBucket],
+    ['VITE_FIREBASE_MESSAGING_SENDER_ID', raw.messagingSenderId],
+    ['VITE_FIREBASE_APP_ID', raw.appId],
+    ['VITE_FIREBASE_DATABASE_ID', raw.firestoreDatabaseId],
+  ];
+  for (const [envName, val] of entries) {
+    if (hasMaskedCharacters(val)) {
+      masked.push(envName);
+    }
+  }
+  const rawDomain = (raw.authDomain ?? '').trim();
+  const invalidAuthDomain = Boolean(
+    rawDomain &&
+      !hasMaskedCharacters(rawDomain) &&
+      !cleanFirebaseAuthDomain(rawDomain) &&
+      cleanFirebaseConfigValue(rawDomain)
+  );
+  return { masked, invalidAuthDomain };
 }
 
 function isCompleteClientConfig(cfg: FirebaseClientConfig): boolean {
@@ -146,6 +222,12 @@ export function resolveFirebaseClientConfig(params: {
   }
 
   if (envComplete) {
+    const envIssues = listMaskedOrMalformedEnvVars(params.envConfig);
+    if (envIssues.masked.length > 0) {
+      warnings.push(
+        `Masked placeholder characters (•••) detected in optional Firebase environment variable(s): ${envIssues.masked.join(', ')}. Replace them with unmasked values from Firebase Console and redeploy.`
+      );
+    }
     checkConfigConsistency(env, warnings);
     return {
       configured: true,
@@ -157,13 +239,27 @@ export function resolveFirebaseClientConfig(params: {
   }
 
   const missingEnvVars = listMissingRequiredEnvVars(env);
+  const envIssues = listMaskedOrMalformedEnvVars(params.envConfig);
+  const failureWarnings: string[] = [];
+  if (envIssues.masked.length > 0) {
+    failureWarnings.push(
+      `Masked bullet/placeholder characters (•••) were pasted into: ${envIssues.masked.join(', ')}. Replace them with the unmasked plain-text values from Firebase Console (e.g. VITE_FIREBASE_AUTH_DOMAIN=your-project-id.firebaseapp.com) in Vercel Environment Variables and redeploy.`
+    );
+  }
+  if (envIssues.invalidAuthDomain) {
+    failureWarnings.push(
+      'VITE_FIREBASE_AUTH_DOMAIN is not a valid ASCII Firebase hostname (expected "<project-id>.firebaseapp.com").'
+    );
+  }
+  failureWarnings.push(
+    `Incomplete Firebase Web SDK configuration. Missing or invalid environment variables: ${missingEnvVars.join(', ')}.`
+  );
+
   return {
     configured: false,
     source: 'none',
     config: {},
-    warnings: [
-      `Incomplete Firebase Web SDK configuration. Missing environment variables: ${missingEnvVars.join(', ')}.`,
-    ],
+    warnings: failureWarnings,
     missingEnvVars,
   };
 }

@@ -165,3 +165,47 @@ test('strips accidental wrapping quotes from VITE_FIREBASE_* env values and reje
   assert.equal(bad.missingEnvVars.length, 4);
 });
 
+test('rejects masked bullet strings (••••) and Punycode/non-ASCII authDomain values before Firebase can build xn-- handler URLs', () => {
+  const masked = resolveFirebaseClientConfig({
+    appletConfig: {},
+    envConfig: {
+      apiKey: 'AIzaSyFakeEnvKeyExample0987654321098',
+      authDomain: '•'.repeat(30),
+      projectId: '•'.repeat(14),
+      storageBucket: '•'.repeat(34),
+      messagingSenderId: '•'.repeat(12),
+      appId: '1:900141604250:web:90bf460446bdec0acc2e23',
+    },
+  });
+  assert.equal(masked.configured, false);
+  assert.deepEqual(masked.missingEnvVars, [
+    'VITE_FIREBASE_AUTH_DOMAIN',
+    'VITE_FIREBASE_PROJECT_ID',
+  ]);
+  assert.ok(
+    masked.warnings.some((w) => w.includes('Masked bullet/placeholder characters'))
+  );
+  assert.ok(masked.warnings.some((w) => w.includes('VITE_FIREBASE_AUTH_DOMAIN')));
+
+  const punycode = resolveFirebaseClientConfig({
+    appletConfig: {},
+    envConfig: {
+      ...VALID_ENV_CONFIG,
+      authDomain: 'xn--nvgaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    },
+  });
+  assert.equal(punycode.configured, false);
+  assert.deepEqual(punycode.missingEnvVars, ['VITE_FIREBASE_AUTH_DOMAIN']);
+
+  const withProtocol = resolveFirebaseClientConfig({
+    appletConfig: {},
+    envConfig: {
+      ...VALID_ENV_CONFIG,
+      authDomain: 'https://aeris-ai-967a7.firebaseapp.com/',
+    },
+  });
+  assert.equal(withProtocol.configured, true);
+  assert.equal(withProtocol.config.authDomain, 'aeris-ai-967a7.firebaseapp.com');
+});
+
+

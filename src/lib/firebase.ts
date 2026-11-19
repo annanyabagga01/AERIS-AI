@@ -207,6 +207,19 @@ if (typeof console !== 'undefined') {
     );
   }
 
+  // Temporary development-only diagnostic logging the effective Firebase authDomain
+  // during initialization (never logs API keys or other secrets).
+  if (import.meta.env.DEV) {
+    console.info('[AERIS Firebase][DEV] Effective authDomain diagnostic:', {
+      effectiveAuthDomain: firebaseConfig.authDomain || null,
+      sdkAuthConfigDomain: auth?.config?.authDomain ?? null,
+      expectedOAuthRedirectUri: getExpectedOAuthRedirectUri(),
+      projectId: firebaseConfig.projectId || null,
+      configSource: resolvedFirebase.source,
+      configured: resolvedFirebase.configured,
+    });
+  }
+
   if (resolvedFirebase.warnings.length > 0) {
     console.warn(
       '[AERIS Firebase] Startup configuration warnings:',
@@ -397,16 +410,18 @@ export async function signInWithGoogle(): Promise<{
       );
     }
     const missing = resolvedFirebase.missingEnvVars;
-    const missingHint =
-      missing.length > 0
-        ? ` Missing environment variables: ${missing.join(', ')}.`
-        : '';
+    const primaryWarning = resolvedFirebase.warnings[0];
+    const missingHint = primaryWarning
+      ? ` ${primaryWarning}`
+      : missing.length > 0
+      ? ` Missing environment variables: ${missing.join(', ')}.`
+      : '';
     console.warn(
       '[AERIS Firebase] signInWithGoogle() aborted: auth instance is null.',
-      { missingEnvVars: missing }
+      { missingEnvVars: missing, warnings: resolvedFirebase.warnings }
     );
     throw new Error(
-      `Firebase Authentication is not configured in this deployment.${missingHint} Configure VITE_FIREBASE_* variables in Vercel and redeploy.`
+      `Firebase Authentication is not configured in this deployment.${missingHint}`
     );
   }
   await ensureAuthPersistence();
