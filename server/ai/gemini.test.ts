@@ -4,6 +4,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import test from 'node:test';
 import {
   buildGeminiContents,
+  buildGeminiModelAttempts,
   isGeminiConfigured,
   loadGeminiApiKey,
   parseGeminiJsonResponse,
@@ -30,6 +31,26 @@ test('loadGeminiApiKey trims whitespace, strips wrapping quotes, and rejects pla
     true
   );
   assert.equal(isGeminiConfigured({ GEMINI_API_KEY: 'YOUR_GEMINI_API_KEY' }), false);
+});
+
+test('buildGeminiModelAttempts uses active supported models and excludes retired gemini-2.5-flash', () => {
+  const defaults = buildGeminiModelAttempts();
+  assert.deepEqual(
+    defaults.map((a) => a.model),
+    ['gemini-3.1-flash-lite', 'gemini-4-hydrogen']
+  );
+  assert.equal(defaults[0].thinkingLevel, 'MINIMAL');
+  assert.equal(defaults[1].thinkingLevel, 'LOW');
+  assert.equal(
+    defaults.some((a) => a.model.includes('gemini-2.5-flash')),
+    false
+  );
+
+  const withCustom = buildGeminiModelAttempts(' "gemini-4-hydrogen" ');
+  assert.deepEqual(
+    withCustom.map((a) => a.model),
+    ['gemini-4-hydrogen', 'gemini-3.1-flash-lite']
+  );
 });
 
 test('buildGeminiContents enforces strict user/model alternation and drops trailing user retry turns', () => {

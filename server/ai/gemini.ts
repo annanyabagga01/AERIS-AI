@@ -20,8 +20,8 @@ import type {
 import { redactSecrets } from '../security.ts';
 
 const OVERALL_DEADLINE_MS = 28_000;
-const MAX_PER_ATTEMPT_TIMEOUT_MS = 21_000;
-const MIN_RETRY_BUDGET_MS = 3_000;
+const DEFAULT_ATTEMPT_TIMEOUT_MS = 18_000;
+const MIN_RETRY_BUDGET_MS = 3_500;
 
 const PLACEHOLDER_KEYS = new Set([
   'MY_GEMINI_API_KEY',
@@ -74,6 +74,40 @@ export function isGeminiConfigured(
   env: Record<string, string | undefined> = process.env
 ): boolean {
   return loadGeminiApiKey(env) !== null;
+}
+
+export interface GeminiModelAttempt {
+  model: string;
+  thinkingLevel?: ThinkingLevel;
+  maxTimeoutMs: number;
+}
+
+/**
+ * Returns the ordered, deduplicated Gemini model fallback chain using only
+ * active, supported models (`gemini-3.1-flash-lite` fast primary, `gemini-4-hydrogen` fallback).
+ */
+export function buildGeminiModelAttempts(
+  configuredModelRaw?: string
+): GeminiModelAttempt[] {
+  const configuredModel = cleanEnvValue(configuredModelRaw);
+  return [
+    ...(configuredModel
+      ? [{ model: configuredModel, maxTimeoutMs: 12_000 }]
+      : []),
+    {
+      model: 'gemini-3.1-flash-lite',
+      thinkingLevel: ThinkingLevel.MINIMAL,
+      maxTimeoutMs: 15_000,
+    },
+    {
+      model: 'gemini-4-hydrogen',
+      thinkingLevel: ThinkingLevel.LOW,
+      maxTimeoutMs: DEFAULT_ATTEMPT_TIMEOUT_MS,
+    },
+  ].filter(
+    (entry, idx, list) =>
+      list.findIndex((item) => item.model === entry.model) === idx
+  );
 }
 
 export interface GeminiContentTurn {
@@ -397,7 +431,14 @@ export async function generateAerisRecommendations(params: {
       workEndHour: params.preferences.workEndHour,
       preferredExerciseTime: params.preferences.preferredExerciseTime,
     },
-    emissionFactorsKgCo2ePerPassengerKm: EMISSION_FACTORS_KG_PER_KM,
+    emissionFactorsKgCo2ePerPassengerKm: Object.fromEntries(
+      Object.entries(EMISSION_FACTORS_KG_PER_KM).map(([mode, meta]) => [
+        mode,
+        meta.hasReliableFactor && meta.factor !== null
+          ? meta.factor
+          : 'qualitative_only',
+      ])
+    ),
     userQuestion:
       params.userPrompt?.trim() ||
       'Provide a structured morning, afternoon, and evening air quality, indoor protection, commuting, and eco impact plan for my household today.',
@@ -411,16 +452,7 @@ export async function generateAerisRecommendations(params: {
   let response;
   let lastErr: unknown;
   const startedAt = Date.now();
-  const configuredModel = cleanEnvValue(process.env.GEMINI_MODEL);
-  const attempts: Array<{ model: string; thinkingLevel?: ThinkingLevel }> = [
-    ...(configuredModel ? [{ model: configuredModel }] : []),
-    { model: 'gemini-3.1-flash-lite', thinkingLevel: ThinkingLevel.MINIMAL },
-    { model: 'gemini-4-hydrogen', thinkingLevel: ThinkingLevel.LOW },
-    { model: 'gemini-2.5-flash' },
-  ].filter(
-    (entry, idx, list) =>
-      list.findIndex((item) => item.model === entry.model) === idx
-  );
+  const attempts = buildGeminiModelAttempts(process.env.GEMINI_MODEL);
 
   for (let attempt = 0; attempt < attempts.length; attempt++) {
     const elapsedMs = Date.now() - startedAt;
@@ -429,11 +461,11 @@ export async function generateAerisRecommendations(params: {
       break;
     }
 
+    const { model, thinkingLevel, maxTimeoutMs } = attempts[attempt];
     const attemptTimeoutMs = Math.max(
       MIN_RETRY_BUDGET_MS,
-      Math.min(MAX_PER_ATTEMPT_TIMEOUT_MS, remainingMs)
+      Math.min(maxTimeoutMs, remainingMs)
     );
-    const { model, thinkingLevel } = attempts[attempt];
 
     try {
       response = await ai.models.generateContent({
@@ -506,7 +538,7 @@ export async function generateAerisRecommendations(params: {
       }
       if (msg.includes('RESOURCE_EXHAUSTED') || msg.includes('429')) {
         throw new Error(
-          'Gemini API quota temporarily reached (429). Please wait a moment or check your billing tier.'
+          'Gemini API quota temporarily reached (429). Please wait a moment or select a billing-enabled API key in Settings > Secrets to increase quota.'
         );
       }
       if (msg.includes('503') || msg.includes('UNAVAILABLE')) {
