@@ -132,6 +132,128 @@
   background: rgba(34, 211, 238, 0.45);
 }
 
+/* Geospatial Leaflet Map Theme (Dark Obsidian) */
+.aeris-leaflet-container {
+  background: #050914 !important;
+  font-family: var(--font-sans) !important;
+  outline: none;
+}
+
+.aeris-leaflet-container .leaflet-control-attribution {
+  background: rgba(5, 9, 20, 0.84) !important;
+  color: #94a3b8 !important;
+  font-size: 10px !important;
+  padding: 2px 8px !important;
+  border-top-left-radius: 6px;
+  border-top: 1px solid rgba(148, 163, 184, 0.16);
+  border-left: 1px solid rgba(148, 163, 184, 0.16);
+  backdrop-filter: blur(6px);
+}
+
+.aeris-leaflet-container .leaflet-control-attribution a {
+  color: #67e8f9 !important;
+}
+
+.aeris-leaflet-tooltip.leaflet-tooltip {
+  background: rgba(7, 13, 29, 0.94);
+  color: #f1f5f9;
+  border: 1px solid rgba(34, 211, 238, 0.35);
+  border-radius: 8px;
+  padding: 6px 10px;
+  box-shadow: 0 10px 26px -10px rgba(2, 6, 23, 0.9);
+  font-family: var(--font-sans);
+  font-size: 12px;
+}
+
+.aeris-leaflet-tooltip.leaflet-tooltip-top::before {
+  border-top-color: rgba(34, 211, 238, 0.35);
+}
+
+.aeris-leaflet-tooltip.leaflet-tooltip-bottom::before {
+  border-bottom-color: rgba(34, 211, 238, 0.35);
+}
+
+.aeris-marker-wrapper {
+  background: transparent !important;
+  border: none !important;
+}
+
+.aeris-marker-root {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+}
+
+.aeris-marker-pulse {
+  position: absolute;
+  inset: -5px;
+  border-radius: 9999px;
+  pointer-events: none;
+  animation: aeris-station-pulse 2.2s cubic-bezier(0.16, 1, 0.3, 1) infinite;
+}
+
+.aeris-marker-pulse-diamond {
+  border-radius: 6px;
+  animation: aeris-diamond-pulse 2.2s cubic-bezier(0.16, 1, 0.3, 1) infinite;
+}
+
+@keyframes aeris-station-pulse {
+  0% {
+    transform: scale(0.85);
+    opacity: 0.65;
+  }
+  70% {
+    transform: scale(1.55);
+    opacity: 0;
+  }
+  100% {
+    transform: scale(1.55);
+    opacity: 0;
+  }
+}
+
+@keyframes aeris-diamond-pulse {
+  0% {
+    transform: rotate(45deg) scale(0.85);
+    opacity: 0.65;
+  }
+  70% {
+    transform: rotate(45deg) scale(1.55);
+    opacity: 0;
+  }
+  100% {
+    transform: rotate(45deg) scale(1.55);
+    opacity: 0;
+  }
+}
+
+.aeris-cluster-icon {
+  background: transparent !important;
+  border: none !important;
+}
+
+.aeris-cluster-badge {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 9999px;
+  background: rgba(7, 13, 29, 0.92);
+  color: #f8fafc;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+  font-size: 12px;
+  box-shadow: 0 6px 18px rgba(2, 6, 23, 0.72);
+  transition: transform 160ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.aeris-cluster-badge:hover {
+  transform: scale(1.08);
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

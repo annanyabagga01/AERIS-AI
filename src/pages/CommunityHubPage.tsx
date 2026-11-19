@@ -1,8 +1,10 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
+  AlertCircle,
   Award,
   Building2,
   Database,
+  Loader2,
   LogIn,
   LogOut,
   PlusCircle,
@@ -20,6 +22,7 @@ import {
 import { ACTION_CATALOG } from '../lib/emissions.ts';
 import {
   deleteOptInContribution,
+  formatFirestoreUiError,
   isFirebaseConfigured,
   joinCommunityChallenge,
   leaveCommunityChallenge,
@@ -58,6 +61,8 @@ export function CommunityHubPage({
 }: CommunityHubPageProps) {
   const firebaseReady = isFirebaseConfigured();
   const [user, setUser] = useState<User | null>(null);
+  const [authReady, setAuthReady] = useState(!firebaseReady);
+  const [authAction, setAuthAction] = useState<'idle' | 'signing_in' | 'signing_out'>('idle');
   const [demoChallenges, setDemoChallenges] = useState<CommunityChallenge[]>([]);
   const [demoContributions, setDemoContributions] = useState<
     CommunityContribution[]
@@ -106,13 +111,19 @@ export function CommunityHubPage({
 
   // Auth subscription
   useEffect(() => {
-    if (!firebaseReady) return () => {};
-    return subscribeAuth((u) => setUser(u));
+    if (!firebaseReady) {
+      setAuthReady(true);
+      return () => {};
+    }
+    return subscribeAuth((u) => {
+      setUser(u);
+      setAuthReady(true);
+    });
   }, [firebaseReady]);
 
-  // Live Firestore subscriptions ONLY when configured, signed in, AND explicitly opted in
+  // Live Firestore subscriptions ONLY when auth is ready, configured, signed in, AND explicitly opted in
   const isLiveOptIn = Boolean(
-    firebaseReady && user && preferences.communityOptIn
+    authReady && firebaseReady && user && preferences.communityOptIn
   );
 
   useEffect(() => {
@@ -128,19 +139,19 @@ export function CommunityHubPage({
         setLiveContributions(items);
         setErrorMessage(null);
       },
-      (err) => setErrorMessage(err.message)
+      (err) => setErrorMessage(formatFirestoreUiError(err))
     );
 
     const unsubChallenges = subscribeLiveChallenges(
       (items) => setLiveChallenges(items),
       () => {
-        // Gracefully retain demo challenge seeds if collection rules/index not yet seeded
+        // Gracefully retain demo challenge templates if collection is not yet seeded
       }
     );
 
     const unsubEnroll = subscribeChallengeParticipants(
       (records) => setLiveParticipants(records),
-      (err) => setErrorMessage(err.message)
+      (err) => setErrorMessage(formatFirestoreUiError(err))
     );
 
     return () => {
@@ -247,11 +258,13 @@ export function CommunityHubPage({
       setErrorMessage('Firebase configuration is not detected.');
       return;
     }
+    setAuthAction('signing_in');
     try {
       await signInWithGoogle();
-      onUpdatePreferences({ ...preferences, communityOptIn: true });
       setStatusMessage(
-        'Signed in and opted in to anonymous Firestore community sharing.'
+        preferences.communityOptIn
+          ? `Signed in with Google. Connected to live Firestore anonymously as "${preferences.anonymousHandle}".`
+          : 'Signed in with Google. Check "Opt-in to live community" above when you are ready to view and share live anonymous Firestore actions.'
       );
     } catch (err) {
       setErrorMessage(
@@ -259,12 +272,40 @@ export function CommunityHubPage({
           ? err.message
           : 'Google sign-in could not complete.'
       );
+    } finally {
+      setAuthAction('idle');
     }
   };
 
   const handleSignOut = async () => {
-    await signOutUser();
-    setStatusMessage('Signed out. Viewing Demo Community Reference preview.');
+    setErrorMessage(null);
+    setStatusMessage(null);
+    setAuthAction('signing_out');
+    try {
+      await signOutUser();
+      setStatusMessage(
+        'Signed out. Live Firestore sync disconnected; viewing Demo Community Preview.'
+      );
+    } catch (err) {
+      setErrorMessage(
+        err instanceof Error ? err.message : 'Unable to sign out right now.'
+      );
+    } finally {
+      setAuthAction('idle');
+    }
+  };
+
+  const handleToggleOptIn = (checked: boolean) => {
+    setErrorMessage(null);
+    onUpdatePreferences({
+      ...preferences,
+      communityOptIn: checked,
+    });
+    setStatusMessage(
+      checked
+        ? `Opted in to live Firestore community sharing anonymously as "${preferences.anonymousHandle}".`
+        : 'Opted out of live community sync. Viewing Demo Community Preview (strictly separate from live Firestore totals).'
+    );
   };
 
   const handleToggleChallenge = async (id: string, currentlyJoined: boolean) => {
@@ -296,9 +337,7 @@ export function CommunityHubPage({
         setStatusMessage('Enrolled anonymously in community challenge.');
       }
     } catch (err) {
-      setErrorMessage(
-        err instanceof Error ? err.message : 'Unable to update enrollment.'
-      );
+      setErrorMessage(formatFirestoreUiError(err));
     }
   };
 
@@ -309,9 +348,7 @@ export function CommunityHubPage({
       await seedChallengesToFirestore(demoChallenges);
       setStatusMessage('Published seasonal challenges to Firestore.');
     } catch (err) {
-      setErrorMessage(
-        err instanceof Error ? err.message : 'Could not publish challenges.'
-      );
+      setErrorMessage(formatFirestoreUiError(err));
     }
   };
 
@@ -358,9 +395,7 @@ export function CommunityHubPage({
         'Anonymous action published to live Firestore community hub.'
       );
     } catch (err) {
-      setErrorMessage(
-        err instanceof Error ? err.message : 'Submission failed.'
-      );
+      setErrorMessage(formatFirestoreUiError(err));
     } finally {
       setSubmitting(false);
     }
@@ -372,9 +407,7 @@ export function CommunityHubPage({
       await deleteOptInContribution(id);
       setStatusMessage('Removed your contribution from Firestore.');
     } catch (err) {
-      setErrorMessage(
-        err instanceof Error ? err.message : 'Unable to delete entry.'
-      );
+      setErrorMessage(formatFirestoreUiError(err));
     }
   };
 
@@ -400,15 +433,17 @@ export function CommunityHubPage({
                   : 'bg-amber-500/15 border-amber-500/35 text-amber-200'
               }`}
             >
-              {isLiveOptIn ? 'Live Firestore Data' : 'Demo Reference Preview'}
+              {isLiveOptIn ? 'Live Firestore Data' : 'Demo Community Preview'}
             </span>
           </div>
           <p className="text-xs text-slate-300 leading-relaxed">
             {isLiveOptIn
-              ? `Connected to Firestore · Sharing anonymously as "${preferences.anonymousHandle}" in ${preferences.city}. Zero emails, coordinates, street addresses, or health details are ever stored.`
+              ? `Connected to Firestore · Sharing anonymously as "${preferences.anonymousHandle}" in ${preferences.city}. Zero emails, real names, coordinates, street addresses, or health details are ever stored or displayed.`
+              : user
+              ? `Signed in with Google (identity kept private; never shown publicly). Demo Community Preview is shown separately until you check "Opt-in to live community" to view and submit live anonymous Firestore actions as "${preferences.anonymousHandle}".`
               : firebaseReady
-              ? 'Demo Community Preview (strictly separated from live Firestore totals). Sign in with Google and opt in to submit and view live anonymous community actions.'
-              : 'Firebase not configured; displaying labeled Demo Community Reference data only.'}
+              ? 'Demo Community Preview (strictly separated from live Firestore totals). Sign in with Google and explicitly opt in to view and submit live anonymous community actions.'
+              : 'Firebase not configured; displaying labeled Demo Community Preview data only.'}
           </p>
         </div>
 
@@ -424,54 +459,75 @@ export function CommunityHubPage({
             </button>
           )}
 
-          {user ? (
+          {!authReady ? (
+            <span className="inline-flex items-center gap-2 px-3 py-2 rounded-lg border border-slate-700 text-xs text-slate-300 whitespace-nowrap">
+              <Loader2 className="w-3.5 h-3.5 animate-spin text-cyan-400" />
+              <span>Checking sign-in...</span>
+            </span>
+          ) : user ? (
             <>
-              <label className="inline-flex items-center gap-2 text-xs text-slate-200 cursor-pointer">
+              <label className="inline-flex items-center gap-2 px-3 py-2 rounded-lg border border-slate-700/80 bg-[#080E1C]/80 text-xs text-slate-200 cursor-pointer hover:border-cyan-500/40 transition-colors">
                 <input
                   type="checkbox"
                   checked={preferences.communityOptIn}
-                  onChange={(e) =>
-                    onUpdatePreferences({
-                      ...preferences,
-                      communityOptIn: e.target.checked,
-                    })
-                  }
+                  onChange={(e) => handleToggleOptIn(e.target.checked)}
                   className="rounded border-slate-600 bg-[#080E1C] text-cyan-500"
                 />
                 <span>Opt-in to live community</span>
               </label>
               <button
                 type="button"
+                disabled={authAction !== 'idle'}
                 onClick={() => void handleSignOut()}
-                className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-slate-700 text-xs font-medium text-slate-200 hover:bg-slate-800/80 transition-colors"
+                className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-slate-700 text-xs font-medium text-slate-200 hover:bg-slate-800/80 disabled:opacity-50 transition-colors whitespace-nowrap"
               >
-                <LogOut className="w-3.5 h-3.5" />
-                <span>Sign Out</span>
+                {authAction === 'signing_out' ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                ) : (
+                  <LogOut className="w-3.5 h-3.5" />
+                )}
+                <span>{authAction === 'signing_out' ? 'Signing out...' : 'Sign Out'}</span>
               </button>
             </>
           ) : (
             <button
               type="button"
+              disabled={authAction !== 'idle' || !firebaseReady}
               onClick={() => void handleSignIn()}
-              className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-cyan-500 text-slate-950 font-semibold text-xs hover:bg-cyan-400 transition-colors whitespace-nowrap"
+              className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-cyan-500 text-slate-950 font-semibold text-xs hover:bg-cyan-400 disabled:opacity-50 transition-colors whitespace-nowrap"
             >
-              <LogIn className="w-4 h-4" />
-              <span>Sign in with Google to Join Live Community</span>
+              {authAction === 'signing_in' ? (
+                <Loader2 className="w-4 h-4 animate-spin" />
+              ) : (
+                <LogIn className="w-4 h-4" />
+              )}
+              <span>
+                {authAction === 'signing_in'
+                  ? 'Signing in with Google...'
+                  : 'Sign in with Google to Join Live Community'}
+              </span>
             </button>
           )}
         </div>
       </section>
 
       {statusMessage && (
-        <div className="p-3.5 rounded-lg bg-emerald-500/10 border border-emerald-500/30 text-xs text-emerald-200 flex items-center gap-2">
+        <div
+          role="status"
+          className="p-3.5 rounded-lg bg-emerald-500/10 border border-emerald-500/30 text-xs text-emerald-200 flex items-center gap-2"
+        >
           <ShieldCheck className="w-4 h-4 text-emerald-400 shrink-0" />
           <span>{statusMessage}</span>
         </div>
       )}
 
       {errorMessage && (
-        <div className="p-3.5 rounded-lg bg-rose-500/10 border border-rose-500/30 text-xs text-rose-200">
-          {errorMessage}
+        <div
+          role="alert"
+          className="p-3.5 rounded-lg bg-rose-500/10 border border-rose-500/30 text-xs text-rose-200 flex items-start gap-2"
+        >
+          <AlertCircle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+          <span className="leading-relaxed">{errorMessage}</span>
         </div>
       )}
 

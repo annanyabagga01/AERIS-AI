@@ -1,10 +1,16 @@
-import { initializeApp } from 'firebase/app';
+import {
+  getApp,
+  getApps,
+  initializeApp,
+  type FirebaseApp,
+} from 'firebase/app';
 import {
   getAuth,
   GoogleAuthProvider,
   onAuthStateChanged,
   signInWithPopup,
   signOut,
+  type Auth,
   type User,
 } from 'firebase/auth';
 import {
@@ -19,15 +25,22 @@ import {
   serverTimestamp,
   setDoc,
   where,
+  type Firestore,
   type Unsubscribe,
 } from 'firebase/firestore';
-import firebaseConfig from '../../firebase-applet-config.json';
 import {
   containsSensitivePiiOrLocation,
   resolveContributionCo2,
   sanitizeAnonymousHandle,
   sanitizeCityName,
 } from './community.ts';
+import {
+  formatFirebaseAuthError,
+  formatFirestoreUiError,
+  resolveFirebaseClientConfig,
+  type FirebaseClientConfig,
+  type FirebasePublicStatus,
+} from './firebaseConfig.ts';
 import type {
   ActionType,
   ChallengeParticipantRecord,
@@ -35,21 +48,61 @@ import type {
   CommunityContribution,
 } from './types.ts';
 
+export { formatFirestoreUiError };
+
+const localAppletConfigs = import.meta.glob<
+  { default?: FirebaseClientConfig } & FirebaseClientConfig
+>('../../firebase-applet-config.json', { eager: true });
+
+const localAppletConfigRaw = Object.values(localAppletConfigs)[0];
+const localAppletConfig: FirebaseClientConfig =
+  localAppletConfigRaw?.default ?? localAppletConfigRaw ?? {};
+
+const envFirebaseConfig: FirebaseClientConfig = {
+  apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
+  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN,
+  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID,
+  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET,
+  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID,
+  appId: import.meta.env.VITE_FIREBASE_APP_ID,
+  firestoreDatabaseId: import.meta.env.VITE_FIREBASE_DATABASE_ID,
+};
+
+const resolvedFirebase = resolveFirebaseClientConfig({
+  appletConfig: localAppletConfig,
+  envConfig: envFirebaseConfig,
+});
+
+const firebaseConfig: FirebaseClientConfig = resolvedFirebase.config;
+
 export function isFirebaseConfigured(): boolean {
-  return Boolean(
-    firebaseConfig &&
-      typeof firebaseConfig.projectId === 'string' &&
-      firebaseConfig.projectId.length > 0 &&
-      firebaseConfig.projectId !== 'remixed-project-id' &&
-      typeof firebaseConfig.apiKey === 'string' &&
-      firebaseConfig.apiKey.length > 0
-  );
+  return resolvedFirebase.configured;
 }
 
-const app = initializeApp(firebaseConfig);
-export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
-export const auth = getAuth(app);
+export function getFirebasePublicStatus(): FirebasePublicStatus {
+  return {
+    configured: resolvedFirebase.configured,
+    source: resolvedFirebase.source,
+    projectId: firebaseConfig.projectId || null,
+    authDomain: firebaseConfig.authDomain || null,
+    hasNamedDatabase: Boolean(firebaseConfig.firestoreDatabaseId),
+    warnings: [...resolvedFirebase.warnings],
+  };
+}
+
+const app: FirebaseApp | null = resolvedFirebase.configured
+  ? getApps().length > 0
+    ? getApp()
+    : initializeApp(firebaseConfig)
+  : null;
+export const db: Firestore | null = app
+  ? firebaseConfig.firestoreDatabaseId
+    ? getFirestore(app, firebaseConfig.firestoreDatabaseId)
+    : getFirestore(app)
+  : null;
+export const auth: Auth | null = app ? getAuth(app) : null;
 const googleProvider = new GoogleAuthProvider();
+googleProvider.setCustomParameters({ prompt: 'select_account' });
 
 export const OperationType = {
   CREATE: 'create',
@@ -88,13 +141,13 @@ export function handleFirestoreError(
   const errInfo: FirestoreErrorInfo = {
     error: error instanceof Error ? error.message : String(error),
     authInfo: {
-      userId: auth.currentUser?.uid,
-      email: auth.currentUser?.email,
-      emailVerified: auth.currentUser?.emailVerified,
-      isAnonymous: auth.currentUser?.isAnonymous,
-      tenantId: auth.currentUser?.tenantId,
+      userId: auth?.currentUser?.uid,
+      email: auth?.currentUser?.email,
+      emailVerified: auth?.currentUser?.emailVerified,
+      isAnonymous: auth?.currentUser?.isAnonymous,
+      tenantId: auth?.currentUser?.tenantId,
       providerInfo:
-        auth.currentUser?.providerData?.map((provider) => ({
+        auth?.currentUser?.providerData?.map((provider) => ({
           providerId: provider.providerId,
           email: provider.email,
         })) || [],
@@ -108,7 +161,7 @@ export function handleFirestoreError(
 
 // Validate Firestore connection on boot
 async function testConnection() {
-  if (!isFirebaseConfigured()) return;
+  if (!isFirebaseConfigured() || !db) return;
   try {
     await getDocFromServer(doc(db, 'test', 'connection'));
   } catch (error) {
@@ -123,16 +176,47 @@ async function testConnection() {
 void testConnection();
 
 export function subscribeAuth(cb: (user: User | null) => void): Unsubscribe {
+  if (!auth) {
+    cb(null);
+    return () => {};
+  }
   return onAuthStateChanged(auth, cb);
 }
 
 export async function signInWithGoogle(): Promise<User> {
-  const cred = await signInWithPopup(auth, googleProvider);
-  return cred.user;
+  if (!auth) {
+    throw new Error(
+      'Firebase Authentication is not configured. Provide local firebase-applet-config.json or complete VITE_FIREBASE_* environment variables.'
+    );
+  }
+  try {
+    const cred = await signInWithPopup(auth, googleProvider);
+    return cred.user;
+  } catch (error) {
+    const currentHost =
+      typeof window !== 'undefined' ? window.location.hostname : null;
+    throw new Error(
+      formatFirebaseAuthError(error, {
+        projectId: firebaseConfig.projectId || null,
+        authDomain: firebaseConfig.authDomain || null,
+        currentHost,
+      })
+    );
+  }
 }
 
 export async function signOutUser(): Promise<void> {
-  await signOut(auth);
+  if (!auth) return;
+  try {
+    await signOut(auth);
+  } catch (error) {
+    throw new Error(
+      formatFirebaseAuthError(error, {
+        projectId: firebaseConfig.projectId || null,
+        authDomain: firebaseConfig.authDomain || null,
+      })
+    );
+  }
 }
 
 function sanitizeId(raw: string): string {
@@ -144,6 +228,10 @@ export function subscribeLiveContributions(
   onData: (items: CommunityContribution[]) => void,
   onError: (err: Error) => void
 ): Unsubscribe {
+  if (!db || !auth) {
+    onData([]);
+    return () => {};
+  }
   const path = 'community_contributions';
   const currentUid = auth.currentUser?.uid;
   const q = query(
@@ -195,6 +283,10 @@ export function subscribeLiveChallenges(
   onData: (challenges: CommunityChallenge[]) => void,
   onError: (err: Error) => void
 ): Unsubscribe {
+  if (!db) {
+    onData([]);
+    return () => {};
+  }
   const path = 'community_challenges';
   const q = query(
     collection(db, path),
@@ -232,8 +324,8 @@ export function subscribeChallengeParticipants(
   onError: (err: Error) => void
 ): Unsubscribe {
   const path = 'challenge_participants';
-  const uid = auth.currentUser?.uid;
-  if (!uid) {
+  const uid = auth?.currentUser?.uid;
+  if (!db || !uid) {
     onData([]);
     return () => {};
   }
@@ -274,18 +366,35 @@ export async function submitOptInContribution(input: {
   note?: string;
   challengeId?: string;
 }): Promise<void> {
-  const user = auth.currentUser;
-  if (!user) {
+  const user = auth?.currentUser;
+  if (!db || !user) {
     throw new Error(
       'Please sign in with Google before submitting to the live community feed.'
     );
   }
 
-  const piiError = containsSensitivePiiOrLocation(
-    `${input.anonymousHandle} ${input.note ?? ''}`
-  );
+  const combinedText = `${input.anonymousHandle} ${input.note ?? ''}`;
+  const piiError = containsSensitivePiiOrLocation(combinedText);
   if (piiError) {
     throw new Error(piiError);
+  }
+
+  const lowerCombined = combinedText.toLowerCase();
+  const userEmail = user.email?.trim().toLowerCase();
+  const userDisplayName = user.displayName?.trim().toLowerCase();
+  if (userEmail && lowerCombined.includes(userEmail)) {
+    throw new Error(
+      'Please do not include your Google email address in your anonymous handle or public note.'
+    );
+  }
+  if (
+    userDisplayName &&
+    userDisplayName.length >= 4 &&
+    lowerCombined.includes(userDisplayName)
+  ) {
+    throw new Error(
+      'Please use an anonymous handle rather than your Google account name in public community activity.'
+    );
   }
 
   const { co2AvoidedKg } = resolveContributionCo2(
@@ -328,8 +437,8 @@ export async function submitOptInContribution(input: {
 export async function deleteOptInContribution(
   contributionId: string
 ): Promise<void> {
-  const user = auth.currentUser;
-  if (!user) {
+  const user = auth?.currentUser;
+  if (!db || !user) {
     throw new Error('Sign in required to delete your contribution.');
   }
   const cleanId = sanitizeId(contributionId);
@@ -345,8 +454,8 @@ export async function joinCommunityChallenge(
   challengeId: string,
   city: string
 ): Promise<void> {
-  const user = auth.currentUser;
-  if (!user) {
+  const user = auth?.currentUser;
+  if (!db || !user) {
     throw new Error('Please sign in with Google to join community challenges.');
   }
   const cleanChallenge = challengeId.replace(/[^a-zA-Z0-9_\-]+/g, '').slice(0, 64);
@@ -369,8 +478,8 @@ export async function joinCommunityChallenge(
 export async function leaveCommunityChallenge(
   challengeId: string
 ): Promise<void> {
-  const user = auth.currentUser;
-  if (!user) {
+  const user = auth?.currentUser;
+  if (!db || !user) {
     throw new Error('Please sign in with Google to manage challenge enrollment.');
   }
   const cleanChallenge = challengeId.replace(/[^a-zA-Z0-9_\-]+/g, '').slice(0, 64);
@@ -387,8 +496,8 @@ export async function leaveCommunityChallenge(
 export async function seedChallengesToFirestore(
   challenges: CommunityChallenge[]
 ): Promise<void> {
-  const user = auth.currentUser;
-  if (!user) {
+  const user = auth?.currentUser;
+  if (!db || !user) {
     throw new Error('Admin sign-in required to seed Firestore challenges.');
   }
   for (const ch of challenges) {

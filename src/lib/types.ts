@@ -7,9 +7,10 @@ export type AqiCategory =
   | 'Severe'
   | 'Unavailable';
 
+export type ValidAqiCategory = Exclude<AqiCategory, 'Unavailable'>;
+
 export type DataSourceType =
-  | 'CPCB_DATA_GOV_IN'
-  | 'OPENAQ_V3_SENSOR'
+  | 'AERIS_SIMULATION_ENGINE'
   | 'DEMO_REFERENCE';
 
 export interface CpcbCategoryMeta {
@@ -38,7 +39,9 @@ export interface StationReading {
   id: string;
   station: string;
   city: string;
+  district?: string;
   state: string;
+  stateCode?: string;
   lat: number;
   lng: number;
   officialAqi: number | null;
@@ -48,10 +51,92 @@ export interface StationReading {
   lastUpdatedIso: string;
   source: DataSourceType;
   sourceLabel: string;
+  dataType?: 'SIMULATED';
   isOfficialNationalAqi: boolean;
   isDemo: boolean;
   isStale: boolean;
   staleNote: string;
+}
+
+export interface SimulatedIndiaStation {
+  id: string;
+  station_name: string;
+  city: string;
+  district: string;
+  state: string;
+  state_code: string;
+  latitude: number;
+  longitude: number;
+  aqi: number;
+  aqi_category: ValidAqiCategory;
+  pm25: number;
+  pm10: number;
+  no2: number;
+  so2: number;
+  co: number;
+  o3: number;
+  timestamp: string;
+  data_source: 'AERIS AI Simulation Engine';
+  data_type: 'SIMULATED';
+}
+
+export interface StateAqiComparison {
+  state: string;
+  state_code: string;
+  isUnionTerritory: boolean;
+  region:
+    | 'North'
+    | 'South'
+    | 'East'
+    | 'West'
+    | 'Central'
+    | 'Northeast'
+    | 'Islands';
+  stationCount: number;
+  averageAqi: number;
+  maxAqi: number;
+  minAqi: number;
+  category: ValidAqiCategory;
+  representativeCity: string;
+}
+
+export interface CategoryDistributionItem {
+  category: ValidAqiCategory;
+  count: number;
+  percentage: number;
+}
+
+export interface IndiaAqiSummary {
+  totalStations: number;
+  statesCovered: number;
+  unionTerritoriesCovered: number;
+  averageAqi: number;
+  highestStation: SimulatedIndiaStation | null;
+  lowestStation: SimulatedIndiaStation | null;
+  categoryDistribution: CategoryDistributionItem[];
+  stateComparison: StateAqiComparison[];
+  generatedAt: string;
+  nextUpdateAt: string;
+  intervalMs: number;
+  data_source: 'AERIS AI Simulation Engine';
+  data_type: 'SIMULATED';
+  disclaimer: string;
+}
+
+export interface IndiaAqiApiResponse {
+  stations: SimulatedIndiaStation[];
+  summary: IndiaAqiSummary;
+  states: { name: string; code: string; isUnionTerritory: boolean }[];
+  metadata: {
+    data_source: 'AERIS AI Simulation Engine';
+    data_type: 'SIMULATED';
+    badge: 'SIMULATED DATA · DEMO MODE';
+    disclaimer: string;
+    generatedAt: string;
+    nextUpdateAt: string;
+    intervalMs: number;
+    totalUnfilteredStations: number;
+  };
 }
 
 export interface AqiTrendPoint {
@@ -74,34 +159,34 @@ export interface OpenAqSensorReading {
   unit: string;
   lastUpdatedIso: string;
   isStale: boolean;
-  source: 'OPENAQ_V3_SENSOR';
+  source: 'AERIS_SIMULATION_ENGINE';
   sourceLabel: string;
   isOfficialNationalAqi: false;
 }
 
 export interface SourceHealthEntry {
-  sourceId: 'cpcb' | 'openaq';
+  sourceId: 'simulation';
   name: string;
   configured: boolean;
-  status: 'live' | 'unconfigured' | 'configured' | 'error' | 'demo';
+  status: 'simulated' | 'error';
   message: string;
   lastCheckedIso: string;
   latencyMs?: number;
   recordsCount?: number;
   cacheHit?: boolean;
-  discoveredSchemaFields?: string[];
-  endpointHint?: string;
+  intervalMs?: number;
   error?: string;
 }
 
 export interface SourceHealthReport {
-  cpcb: SourceHealthEntry;
-  openAq: SourceHealthEntry;
+  simulation: SourceHealthEntry;
 }
 
 export interface CityAqiResponse {
   city: string;
+  district?: string;
   state: string;
+  stateCode?: string;
   lat: number;
   lng: number;
   primaryAqi: number | null;
@@ -114,10 +199,12 @@ export interface CityAqiResponse {
   openAqSensors: OpenAqSensorReading[];
   trend24h: AqiTrendPoint[];
   lastUpdatedIso: string;
-  dataMode: 'live' | 'partial' | 'demo';
+  dataMode: 'demo';
+  dataSource: 'AERIS AI Simulation Engine';
+  dataType: 'SIMULATED';
   sourceDisclaimer: string;
-  hasOfficialData: boolean;
-  hasOpenAqData: boolean;
+  hasOfficialData: false;
+  hasOpenAqData: false;
   staleStationsCount: number;
   sourceHealth: SourceHealthReport;
 }

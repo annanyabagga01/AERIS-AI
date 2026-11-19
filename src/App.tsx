@@ -63,7 +63,7 @@ const NAV_ITEMS: {
     label: 'Dashboard',
     shortLabel: 'Home',
     icon: Activity,
-    subtitle: 'Verified AQI & 3D atmospheric telemetry',
+    subtitle: 'India-wide simulated AQI & 3D atmospheric telemetry (Demo Mode)',
     group: 'Atmospheric Monitoring',
   },
   {
@@ -402,14 +402,8 @@ function AerisShell() {
               <span className="font-medium text-slate-200 truncate">
                 {preferences.city}
               </span>
-              <span className="font-mono text-[11px] text-slate-400 shrink-0">
-                {aqiData?.dataMode === 'live'
-                  ? 'Live CPCB'
-                  : aqiData?.dataMode === 'partial'
-                  ? aqiData.hasOfficialData
-                    ? 'Live CPCB (AQI N/A)'
-                    : 'Demo + OpenAQ'
-                  : 'Demo Ref'}
+              <span className="font-mono text-[11px] text-amber-300 shrink-0">
+                Simulated · Demo
               </span>
             </div>
             <p className="font-mono tabular-nums text-xs text-slate-300 flex items-center gap-1.5">
@@ -624,6 +618,8 @@ function AerisShell() {
                 <SettingsPage
                   preferences={preferences}
                   onSavePreferences={handleUpdatePreferences}
+                  aqiData={aqiData}
+                  aqiLoading={aqiLoading}
                 />
               )}
             </motion.div>

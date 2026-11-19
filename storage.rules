@@ -1,0 +1,12 @@
+rules_version = '2';
+
+// Default-deny Firebase Cloud Storage rules for AERIS AI.
+// This application does not store user uploads in Cloud Storage; locking all
+// paths prevents unauthorized uploads, hosting abuse, and storage quota drain.
+service firebase.storage {
+  match /b/{bucket}/o {
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}

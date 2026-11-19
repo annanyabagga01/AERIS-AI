@@ -202,16 +202,16 @@ export function buildPersonalizedRoutine(
     saferOutdoorWindow = {
       supportedByCurrentData: false,
       statusLabel: 'Not Confirmed by Current Data',
-      windowLabel: 'Prefer Indoor Alternatives Until Live Verified Update',
+      windowLabel: 'Prefer Indoor Alternatives (Demo Mode)',
       rationale:
-        'AERIS AI does not confirm safe outdoor workout windows without fresh verified CPCB data (<3h). Keep intense exercise indoors until current station readings verify lower exposure.',
+        'Current readings come from the AERIS AI Simulation Engine (Demo Mode) rather than live environmental monitors. Treat outdoor exercise guidance as a demonstration and verify local conditions before vigorous outdoor activity.',
     };
   } else if (highSmog) {
     saferOutdoorWindow = {
       supportedByCurrentData: false,
       statusLabel: `Outdoor Exertion Unsafe (${category})`,
       windowLabel: 'No Safe Prolonged Outdoor Exercise Window Today',
-      rationale: `Current verified AQI is ${aqi} (${category}). Elevated PM2.5 increases inhaled dose sharply during outdoor cardio; move workouts indoors and limit outdoor errands to brief 13:00–15:30 windows if necessary.`,
+      rationale: `Current simulated AQI is ${aqi} (${category}). Elevated PM2.5 increases inhaled dose sharply during outdoor cardio; move workouts indoors and limit outdoor errands to brief 13:00–15:30 windows if necessary.`,
     };
   } else if (moderate) {
     if (sensitive) {
@@ -219,18 +219,17 @@ export function buildPersonalizedRoutine(
         supportedByCurrentData: false,
         statusLabel: 'Restricted for Sensitive Households (Moderate)',
         windowLabel: 'Indoor Preferred · Brief 15m Midday Only (13:00–15:30)',
-        rationale: `Verified AQI is ${aqi} (Moderate), with household sensitivity active. Skip strenuous outdoor sessions; only short, gentle low-exertion outdoor movement around midday solar mixing is advised.`,
+        rationale: `Current simulated AQI is ${aqi} (Moderate), with household sensitivity active. Skip strenuous outdoor sessions; only short, gentle low-exertion outdoor movement around midday solar mixing is advised.`,
       };
     } else {
       saferOutdoorWindow = {
         supportedByCurrentData: true,
         statusLabel: 'Bounded Midday Window Supported',
         windowLabel: '13:00 – 15:30 (Max 25 min, Away From Traffic)',
-        rationale: `Current verified AQI is ${aqi} (Moderate). Midday solar warming typically improves vertical dispersion compared to 06:00–09:30 or post-sunset peaks; keep intensity light to moderate.`,
+        rationale: `Current simulated AQI is ${aqi} (Moderate). Midday solar warming typically improves vertical dispersion compared to 06:00–09:30 or post-sunset peaks; keep intensity light to moderate.`,
       };
     }
   } else {
-    // Good or Satisfactory AND verified current
     const preferredWindow =
       prefs.preferredExerciseTime === 'morning'
         ? '07:00 – 09:30 (or 13:00 – 16:00)'
@@ -241,7 +240,7 @@ export function buildPersonalizedRoutine(
       supportedByCurrentData: true,
       statusLabel: `Outdoor Activity Supported (${category})`,
       windowLabel: preferredWindow,
-      rationale: `Current verified AQI is ${aqi} (${category}), supporting normal outdoor exercise and campus/work walking away from congested intersections.`,
+      rationale: `Current simulated AQI is ${aqi} (${category}), supporting normal outdoor exercise and campus/work walking away from congested intersections.`,
     };
   }
 

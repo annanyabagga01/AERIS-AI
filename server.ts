@@ -3,202 +3,186 @@ import express from 'express';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import {
-  INDIAN_CITIES,
-  resolveStationSelection,
-  resolveSupportedCity,
-} from './src/lib/aqi.ts';
+import { classifyCpcbAqi, INDIAN_CITIES } from './src/lib/aqi.ts';
 import {
   calculateCommuteImpact,
   EMISSION_FACTORS_KG_PER_KM,
 } from './src/lib/emissions.ts';
+import {
+  buildSimulatedCityAqiResponse,
+  getIndiaSimulatedSnapshot,
+  queryIndiaSimulatedApi,
+  resolveSimulationIntervalMs,
+  SIMULATION_BADGE_TEXT,
+  SIMULATION_DATA_SOURCE,
+  SIMULATION_DATA_TYPE,
+  SIMULATION_DISCLAIMER_TEXT,
+} from './src/lib/indiaSimulation.ts';
 import type {
   CityAqiResponse,
   EmissionsInput,
   FamilyPreferences,
-  SourceHealthReport,
 } from './src/lib/types.ts';
 import {
-  fetchCpcbStations,
-  getLastCpcbHealth,
-  isCpcbConfigured,
-} from './server/adapters/cpcb.ts';
-import {
-  buildDemoAllCitiesStations,
-  buildDemoCityResponse,
   DEMO_CHALLENGES,
   DEMO_CONTRIBUTIONS,
 } from './server/adapters/demoData.ts';
 import {
-  fetchOpenAqSensors,
-  getLastOpenAqHealth,
-  isOpenAqConfigured,
-} from './server/adapters/openaq.ts';
-import {
   generateAerisRecommendations,
   isGeminiConfigured,
 } from './server/ai/gemini.ts';
+import {
+  detectApproximateIndianCity,
+  extractClientIp,
+} from './server/location.ts';
+import { redactSecrets } from './server/security.ts';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT) || 3000;
+const SIMULATION_INTERVAL_MS = resolveSimulationIntervalMs(
+  process.env.SIMULATION_INTERVAL_MS
+);
 
 class UnsupportedCityError extends Error {
   status = 404;
   supportedCities = INDIAN_CITIES.map((c) => c.name);
   constructor(cityName: string) {
     super(
-      `City "${cityName}" is not in the supported Indian monitoring catalog (${INDIAN_CITIES.map((c) => c.name).join(', ')}).`
+      `City "${cityName}" is not in the AERIS AI simulated Indian city catalog.`
     );
     this.name = 'UnsupportedCityError';
   }
 }
 
-async function resolveCityAqi(
+function resolveSimulatedCityAqi(
   cityQuery: string,
-  options?: { station?: string; forceRefresh?: boolean }
-): Promise<CityAqiResponse> {
+  options?: { station?: string }
+): CityAqiResponse {
   const trimmedQuery = cityQuery.trim() || 'Delhi';
-  const matchedCity = resolveSupportedCity(trimmedQuery);
-
-  if (!matchedCity) {
-    const cpcbCheck = await fetchCpcbStations({
-      cityFilter: trimmedQuery,
-      forceRefresh: options?.forceRefresh,
-    });
-    if (cpcbCheck.configured && cpcbCheck.stations.length > 0) {
-      const stations = cpcbCheck.stations;
-      const selection = resolveStationSelection(stations, options?.station);
-      const first = selection.selectedStation ?? stations[0];
-      return {
-        city: first.city || trimmedQuery,
-        state: first.state || 'India',
-        lat: first.lat || 22.9734,
-        lng: first.lng || 78.6569,
-        primaryAqi: selection.primaryAqi,
-        category: selection.categoryMeta.category,
-        categoryMeta: selection.categoryMeta,
-        predominantPollutant: selection.predominantPollutant,
-        selectedStationId: selection.selectedStation?.id ?? null,
-        selectedStationName: selection.selectedStation?.station ?? null,
-        stations,
-        openAqSensors: [],
-        trend24h: [],
-        lastUpdatedIso: selection.lastUpdatedIso,
-        dataMode: selection.primaryAqi !== null ? 'live' : 'partial',
-        sourceDisclaimer:
-          selection.primaryAqi !== null
-            ? 'Live official CPCB station feed via data.gov.in.'
-            : 'CPCB stations returned incomplete pollutant readings or incompatible units; official AQI is marked Unavailable.',
-        hasOfficialData: true,
-        hasOpenAqData: false,
-        staleStationsCount: stations.filter((s) => s.isStale).length,
-        sourceHealth: {
-          cpcb: cpcbCheck.health,
-          openAq: getLastOpenAqHealth(),
-        },
-      };
-    }
+  const result = buildSimulatedCityAqiResponse(trimmedQuery, classifyCpcbAqi, {
+    station: options?.station,
+    intervalMs: SIMULATION_INTERVAL_MS,
+  });
+  if (!result) {
     throw new UnsupportedCityError(trimmedQuery);
   }
-
-  const [cpcbResult, openAqResult] = await Promise.all([
-    fetchCpcbStations({
-      cityFilter: matchedCity.name,
-      forceRefresh: options?.forceRefresh,
-    }),
-    fetchOpenAqSensors(matchedCity.name, matchedCity.lat, matchedCity.lng, {
-      forceRefresh: options?.forceRefresh,
-    }),
-  ]);
-
-  const sourceHealth: SourceHealthReport = {
-    cpcb: cpcbResult.health,
-    openAq: openAqResult.health,
-  };
-
-  if (cpcbResult.configured && cpcbResult.stations.length > 0) {
-    const stations = cpcbResult.stations;
-    const selection = resolveStationSelection(stations, options?.station);
-
-    return {
-      city: matchedCity.name,
-      state: matchedCity.state,
-      lat: selection.selectedStation?.lat ?? matchedCity.lat,
-      lng: selection.selectedStation?.lng ?? matchedCity.lng,
-      primaryAqi: selection.primaryAqi,
-      category: selection.categoryMeta.category,
-      categoryMeta: selection.categoryMeta,
-      predominantPollutant: selection.predominantPollutant,
-      selectedStationId: selection.selectedStation?.id ?? null,
-      selectedStationName: selection.selectedStation?.station ?? null,
-      stations,
-      openAqSensors: openAqResult.sensors,
-      trend24h: [],
-      lastUpdatedIso: selection.lastUpdatedIso,
-      dataMode: selection.primaryAqi !== null ? 'live' : 'partial',
-      sourceDisclaimer:
-        selection.primaryAqi !== null
-          ? 'Live official CPCB station feed via data.gov.in.' +
-            (openAqResult.sensors.length > 0
-              ? ' OpenAQ v3 sensor readings are shown separately and never replace official Indian National AQI.'
-              : '')
-          : 'CPCB stations returned incomplete pollutant readings or incompatible units; official AQI is marked Unavailable.',
-      hasOfficialData: true,
-      hasOpenAqData: openAqResult.sensors.length > 0,
-      staleStationsCount: stations.filter((s) => s.isStale).length,
-      sourceHealth,
-    };
-  }
-
-  const demo = buildDemoCityResponse(
-    matchedCity.name,
-    options?.station,
-    sourceHealth
-  );
-
-  if (cpcbResult.error) {
-    demo.sourceDisclaimer = `CPCB data.gov.in error (${cpcbResult.error}). Showing clearly labeled Demo Reference Data instead of fabricating live values.`;
-  } else if (cpcbResult.configured && cpcbResult.stations.length === 0) {
-    demo.sourceDisclaimer = `CPCB data.gov.in returned 0 stations for ${matchedCity.name}. Showing clearly labeled Demo Reference Data.`;
-  }
-
-  if (openAqResult.sensors.length > 0) {
-    demo.openAqSensors = openAqResult.sensors;
-    demo.hasOpenAqData = true;
-    demo.dataMode = 'partial';
-    demo.sourceDisclaimer =
-      'CPCB feed unavailable; city baseline uses clearly labeled Demo Reference Data while live OpenAQ v3 sensor readings are shown separately (never substituted for official Indian National AQI).';
-  }
-  return demo;
+  return result;
 }
 
 async function startServer() {
   const app = express();
+  app.disable('x-powered-by');
+  app.use((_req, res, next) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+    res.setHeader(
+      'Permissions-Policy',
+      'camera=(), microphone=(), geolocation=(self)'
+    );
+    next();
+  });
   app.use(express.json({ limit: '256kb' }));
 
   // 1. Health & configuration check (non-secret status only, never expose keys)
   app.get('/api/health', (_req, res) => {
-    const firebaseConfigExists = fs.existsSync(
-      path.join(__dirname, 'firebase-applet-config.json')
-    );
+    const snapshot = getIndiaSimulatedSnapshot(Date.now(), SIMULATION_INTERVAL_MS);
+    const firebaseConfigExists =
+      fs.existsSync(path.join(__dirname, 'firebase-applet-config.json')) ||
+      Boolean(
+        process.env.VITE_FIREBASE_PROJECT_ID?.trim() &&
+          !process.env.VITE_FIREBASE_PROJECT_ID.trim().startsWith('your-') &&
+          process.env.VITE_FIREBASE_API_KEY?.trim() &&
+          !process.env.VITE_FIREBASE_API_KEY.trim().startsWith('YOUR_')
+      );
     res.json({
       status: 'ok',
       timestampIso: new Date().toISOString(),
       integrations: {
         geminiConfigured: isGeminiConfigured(),
-        cpcbConfigured: isCpcbConfigured(),
-        openAqConfigured: isOpenAqConfigured(),
         firebaseConfigured: firebaseConfigExists,
+        simulationEngineActive: true,
       },
-      sources: {
-        cpcb: getLastCpcbHealth(),
-        openAq: getLastOpenAqHealth(),
+      simulationEngine: {
+        dataSource: SIMULATION_DATA_SOURCE,
+        dataType: SIMULATION_DATA_TYPE,
+        badge: SIMULATION_BADGE_TEXT,
+        disclaimer: SIMULATION_DISCLAIMER_TEXT,
+        totalStations: snapshot.summary.totalStations,
+        statesCovered: snapshot.summary.statesCovered,
+        unionTerritoriesCovered: snapshot.summary.unionTerritoriesCovered,
+        intervalMs: snapshot.intervalMs,
+        generatedAt: snapshot.generatedAt,
+        nextUpdateAt: snapshot.nextUpdateAt,
       },
     });
   });
 
-  // 2. City AQI endpoint (CPCB primary -> OpenAQ sensor -> labeled Demo fallback)
-  app.get('/api/aqi', async (req, res) => {
+  // 1b. Temporary server-side IP approximate Indian city detection (zero storage)
+  app.get('/api/location/approximate', async (req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    try {
+      const clientIp = extractClientIp(req);
+      const result = await detectApproximateIndianCity(clientIp);
+      res.json(result);
+    } catch {
+      res.json({
+        detected: false,
+        city: null,
+        state: null,
+        stateCode: null,
+        region: null,
+        detectionMethod: 'unavailable',
+        isApproximate: true,
+        coordinatesStored: false,
+        provider: null,
+        reason: 'lookup_unavailable',
+        message:
+          'Approximate IP city detection is temporarily unavailable. Please select an Indian city manually.',
+      });
+    }
+  });
+
+  // 2. Self-generated India-wide simulated AQI API (all 28 states + 8 UTs)
+  app.get('/api/india/aqi', (req, res) => {
+    try {
+      const state =
+        typeof req.query.state === 'string'
+          ? req.query.state.trim().slice(0, 80)
+          : undefined;
+      const city =
+        typeof req.query.city === 'string'
+          ? req.query.city.trim().slice(0, 80)
+          : undefined;
+      const category =
+        typeof req.query.category === 'string'
+          ? req.query.category.trim().slice(0, 32)
+          : undefined;
+      const search =
+        typeof req.query.search === 'string'
+          ? req.query.search.trim().slice(0, 100)
+          : undefined;
+
+      const payload = queryIndiaSimulatedApi({
+        state,
+        city,
+        category,
+        search,
+        intervalMs: SIMULATION_INTERVAL_MS,
+      });
+      res.json(payload);
+    } catch (err) {
+      res.status(500).json({
+        error: redactSecrets(
+          err instanceof Error
+            ? err.message
+            : 'Unable to generate simulated India AQI dataset.'
+        ),
+      });
+    }
+  });
+
+  // 3. City AQI endpoint powered by AERIS AI Simulation Engine
+  app.get('/api/aqi', (req, res) => {
     try {
       const city =
         typeof req.query.city === 'string' && req.query.city.trim().length > 0
@@ -208,10 +192,8 @@ async function startServer() {
         typeof req.query.station === 'string' && req.query.station.trim().length > 0
           ? req.query.station.trim().slice(0, 120)
           : undefined;
-      const forceRefresh =
-        req.query.refresh === '1' || req.query.refresh === 'true';
 
-      const data = await resolveCityAqi(city, { station, forceRefresh });
+      const data = resolveSimulatedCityAqi(city, { station });
       res.json(data);
     } catch (err) {
       if (err instanceof UnsupportedCityError) {
@@ -222,43 +204,11 @@ async function startServer() {
         return;
       }
       res.status(500).json({
-        error:
+        error: redactSecrets(
           err instanceof Error
             ? err.message
-            : 'Unable to retrieve air quality data.',
-      });
-    }
-  });
-
-  // 3. All stations across India for Pollution Map
-  app.get('/api/aqi/all', async (req, res) => {
-    try {
-      const forceRefresh =
-        req.query.refresh === '1' || req.query.refresh === 'true';
-      const cpcbResult = await fetchCpcbStations({ forceRefresh });
-      if (cpcbResult.configured && cpcbResult.stations.length > 0) {
-        res.json({
-          dataMode: 'live',
-          stations: cpcbResult.stations,
-          disclaimer: 'Live official CPCB station feed via data.gov.in.',
-          sourceHealth: { cpcb: cpcbResult.health },
-        });
-        return;
-      }
-      res.json({
-        dataMode: 'demo',
-        stations: buildDemoAllCitiesStations(),
-        disclaimer: cpcbResult.error
-          ? `CPCB feed error (${cpcbResult.error}). Showing Demo Reference Stations (Not Live).`
-          : 'Demo Reference Stations (Not Live). Configure DATA_GOV_IN_API_KEY and DATA_GOV_IN_RESOURCE_ID for official live station markers.',
-        sourceHealth: { cpcb: cpcbResult.health },
-      });
-    } catch (err) {
-      res.status(500).json({
-        error:
-          err instanceof Error
-            ? err.message
-            : 'Unable to load station map data.',
+            : 'Unable to retrieve simulated air quality data.'
+        ),
       });
     }
   });
@@ -290,15 +240,15 @@ async function startServer() {
           ? body.station.trim().slice(0, 120)
           : undefined;
 
-      const verifiedContext = await resolveCityAqi(body.city, { station });
+      const simulatedContext = resolveSimulatedCityAqi(body.city, { station });
       const { sanitizeChatHistory, evaluateAqiVerificationStatus } = await import(
         './src/lib/aiContext.ts'
       );
       const history = sanitizeChatHistory(body.history, 8);
-      const verification = evaluateAqiVerificationStatus(verifiedContext);
+      const verification = evaluateAqiVerificationStatus(simulatedContext);
 
       const structured = await generateAerisRecommendations({
-        aqiContext: verifiedContext,
+        aqiContext: simulatedContext,
         preferences: body.preferences,
         userPrompt:
           typeof body.question === 'string'
@@ -309,15 +259,17 @@ async function startServer() {
 
       res.json({
         verifiedContext: {
-          city: verifiedContext.city,
+          city: simulatedContext.city,
           station:
-            verifiedContext.selectedStationName ??
-            verifiedContext.stations[0]?.station ??
+            simulatedContext.selectedStationName ??
+            simulatedContext.stations[0]?.station ??
             null,
-          primaryAqi: verifiedContext.primaryAqi,
-          category: verifiedContext.category,
-          lastUpdatedIso: verifiedContext.lastUpdatedIso,
-          dataMode: verifiedContext.dataMode,
+          primaryAqi: simulatedContext.primaryAqi,
+          category: simulatedContext.category,
+          lastUpdatedIso: simulatedContext.lastUpdatedIso,
+          dataMode: simulatedContext.dataMode,
+          dataSource: simulatedContext.dataSource,
+          dataType: simulatedContext.dataType,
           isLiveVerified: verification.isLiveVerified,
           verificationNotice: verification.verificationNotice,
         },
@@ -328,10 +280,11 @@ async function startServer() {
         res.status(404).json({ error: err.message });
         return;
       }
-      const message =
+      const message = redactSecrets(
         err instanceof Error
           ? err.message
-          : 'Gemini AI recommendation request failed.';
+          : 'Gemini AI recommendation request failed.'
+      );
       const status =
         message.includes('not configured') ||
         message.includes('503') ||

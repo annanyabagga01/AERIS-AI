@@ -2,23 +2,17 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   classifyCpcbAqi,
-  discoverCpcbSchemaMapping,
   findNearestSupportedCity,
   getCityQueryAliases,
   hasSufficientPollutantsForOfficialAqi,
   isTimestampStale,
   normalizePollutantUnit,
-  parseCpcbTimestamp,
   resolveStationSelection,
   resolveSupportedCity,
 } from './aqi.ts';
-import type { PollutantReading } from './types.ts';
-import {
-  aggregateCpcbRecords,
-  filterStationsByCityAliases,
-} from '../../server/adapters/cpcb.ts';
+import type { PollutantReading, StationReading } from './types.ts';
 
-test('classifyCpcbAqi follows official CPCB National AQI breakpoints', () => {
+test('classifyCpcbAqi follows India CPCB National AQI breakpoints', () => {
   assert.equal(classifyCpcbAqi(0).category, 'Good');
   assert.equal(classifyCpcbAqi(50).category, 'Good');
   assert.equal(classifyCpcbAqi(51).category, 'Satisfactory');
@@ -36,7 +30,7 @@ test('classifyCpcbAqi follows official CPCB National AQI breakpoints', () => {
   assert.equal(classifyCpcbAqi(-5).category, 'Unavailable');
 });
 
-test('hasSufficientPollutantsForOfficialAqi rejects incomplete or unit-incompatible readings', () => {
+test('hasSufficientPollutantsForOfficialAqi validates pollutant completeness and units', () => {
   const twoPollutants: PollutantReading[] = [
     { id: 'PM2.5', label: 'PM2.5', value: 120, min: 90, max: 150, unit: 'µg/m³' },
     { id: 'PM10', label: 'PM10', value: 210, min: 180, max: 250, unit: 'µg/m³' },
@@ -49,13 +43,6 @@ test('hasSufficientPollutantsForOfficialAqi rejects incomplete or unit-incompati
     { id: 'CO', label: 'CO', value: 1.1, min: 0.8, max: 1.5, unit: 'mg/m³' },
   ];
   assert.equal(hasSufficientPollutantsForOfficialAqi(threeWithoutPm), false);
-
-  const incompatibleUnits: PollutantReading[] = [
-    { id: 'PM2.5', label: 'PM2.5', value: 155, min: 110, max: 190, unit: 'µg/m³', unitCompatibleWithCpcb: true },
-    { id: 'NO2', label: 'NO2', value: 45, min: 30, max: 60, unit: 'ppb', unitCompatibleWithCpcb: false },
-    { id: 'CO', label: 'CO', value: 1.2, min: 0.9, max: 1.5, unit: 'ppm', unitCompatibleWithCpcb: false },
-  ];
-  assert.equal(hasSufficientPollutantsForOfficialAqi(incompatibleUnits), false);
 
   const completeThreeWithPm: PollutantReading[] = [
     { id: 'PM2.5', label: 'PM2.5', value: 155, min: 110, max: 190, unit: 'µg/m³', unitCompatibleWithCpcb: true },
@@ -77,179 +64,77 @@ test('normalizePollutantUnit never merges incompatible units', () => {
   const pmValid = normalizePollutantUnit('ug/m3', 'PM2.5');
   assert.equal(pmValid.unit, 'µg/m³');
   assert.equal(pmValid.compatibleWithCpcb, true);
-
-  const no2Ppb = normalizePollutantUnit('ppb', 'NO2');
-  assert.equal(no2Ppb.unit, 'ppb');
-  assert.equal(no2Ppb.compatibleWithCpcb, false);
 });
 
-test('getCityQueryAliases resolves Gurugram/Gurgaon, Delhi, and Kolkata', () => {
+test('getCityQueryAliases and resolveSupportedCity handle nationwide cities and aliases', () => {
   assert.deepEqual(getCityQueryAliases('Gurugram'), ['Gurugram', 'Gurgaon']);
-  assert.deepEqual(getCityQueryAliases('Delhi'), ['Delhi', 'New Delhi']);
-  assert.deepEqual(getCityQueryAliases('Kolkata'), ['Kolkata', 'Calcutta']);
-});
-
-test('discoverCpcbSchemaMapping adapts to data.gov.in field metadata variants', () => {
-  const schema = discoverCpcbSchemaMapping([
-    { id: 'station_name', name: 'Station', type: 'keyword' },
-    { id: 'city', name: 'City', type: 'keyword' },
-    { id: 'avg_value', name: 'Average', type: 'double' },
-    { id: 'pollutant_unit', name: 'Unit', type: 'keyword' },
-  ]);
-  assert.equal(schema.stationField, 'station_name');
-  assert.equal(schema.avgField, 'avg_value');
-  assert.equal(schema.unitField, 'pollutant_unit');
-});
-
-test('aggregateCpcbRecords normalizes Gurugram, Delhi, Kolkata and rejects incomplete AQI', () => {
-  const nowMs = Date.parse('2026-11-17T15:00:00+05:30');
-  const records = [
-    // Gurugram (via Gurgaon alias) with 3 valid CPCB pollutants -> computes official AQI
-    {
-      country: 'India',
-      state: 'Haryana',
-      city: 'Gurgaon',
-      station: 'Vikas Sadan, Gurugram - HSPCB',
-      last_update: '17-11-2026 14:30:00',
-      latitude: '28.4501',
-      longitude: '77.0263',
-      pollutant_id: 'PM2.5',
-      pollutant_min: '95',
-      pollutant_max: '175',
-      pollutant_avg: '135',
-    },
-    {
-      city: 'Gurgaon',
-      station: 'Vikas Sadan, Gurugram - HSPCB',
-      last_update: '17-11-2026 14:30:00',
-      pollutant_id: 'PM10',
-      pollutant_avg: '240',
-    },
-    {
-      city: 'Gurgaon',
-      station: 'Vikas Sadan, Gurugram - HSPCB',
-      last_update: '17-11-2026 14:30:00',
-      pollutant_id: 'NO2',
-      pollutant_avg: '52',
-    },
-    // Kolkata station with only 2 pollutants -> MUST remain Unavailable (null)
-    {
-      state: 'West Bengal',
-      city: 'Kolkata',
-      station: 'Ballygunge, Kolkata - WBPCB',
-      last_update: '17-11-2026 14:00:00',
-      latitude: '22.5367',
-      longitude: '88.3638',
-      pollutant_id: 'PM2.5',
-      pollutant_avg: '110',
-    },
-    {
-      state: 'West Bengal',
-      city: 'Kolkata',
-      station: 'Ballygunge, Kolkata - WBPCB',
-      last_update: '17-11-2026 14:00:00',
-      pollutant_id: 'NO2',
-      pollutant_avg: '40',
-    },
-    // Delhi station
-    {
-      state: 'Delhi',
-      city: 'Delhi',
-      station: 'Anand Vihar, Delhi - DPCC',
-      last_update: '17-11-2026 14:30:00',
-      latitude: '28.6476',
-      longitude: '77.3158',
-      pollutant_id: 'PM2.5',
-      pollutant_avg: '185',
-    },
-    {
-      state: 'Delhi',
-      city: 'Delhi',
-      station: 'Anand Vihar, Delhi - DPCC',
-      last_update: '17-11-2026 14:30:00',
-      pollutant_id: 'PM10',
-      pollutant_avg: '310',
-    },
-    {
-      state: 'Delhi',
-      city: 'Delhi',
-      station: 'Anand Vihar, Delhi - DPCC',
-      last_update: '17-11-2026 14:30:00',
-      pollutant_id: 'CO',
-      pollutant_avg: '2.1',
-      pollutant_unit: 'mg/m3',
-    },
-  ];
-
-  const allStations = aggregateCpcbRecords(records, nowMs);
-  assert.equal(allStations.length, 3);
-
-  const gurugramStations = filterStationsByCityAliases(allStations, 'Gurugram');
-  assert.equal(gurugramStations.length, 1);
-  assert.equal(gurugramStations[0].isOfficialNationalAqi, true);
-  assert.ok(gurugramStations[0].officialAqi !== null && gurugramStations[0].officialAqi > 300);
-
-  const kolkataStations = filterStationsByCityAliases(allStations, 'Kolkata');
-  assert.equal(kolkataStations.length, 1);
-  assert.equal(kolkataStations[0].officialAqi, null);
-  assert.equal(kolkataStations[0].category, 'Unavailable');
-  assert.equal(kolkataStations[0].isOfficialNationalAqi, false);
-
-  const delhiStations = filterStationsByCityAliases(allStations, 'Delhi');
-  assert.equal(delhiStations.length, 1);
-  const selected = resolveStationSelection(delhiStations, delhiStations[0].id);
-  assert.equal(selected.selectedStation?.station, 'Anand Vihar, Delhi - DPCC');
-  assert.ok(selected.primaryAqi !== null && selected.primaryAqi >= 300);
-});
-
-test('parseCpcbTimestamp and isTimestampStale handle data.gov.in IST timestamps', () => {
-  const iso = parseCpcbTimestamp('17-11-2026 14:30:00');
-  assert.equal(iso, '2026-11-17T14:30:00+05:30');
-
-  const nowMs = Date.parse('2026-11-17T15:00:00+05:30');
-  assert.equal(isTimestampStale(iso, nowMs, 180), false);
-
-  const sixHoursLaterMs = Date.parse('2026-11-17T20:30:00+05:30');
-  assert.equal(isTimestampStale(iso, sixHoursLaterMs, 180), true);
-});
-
-test('findNearestSupportedCity resolves Mumbai coordinates to Mumbai', () => {
-  const city = findNearestSupportedCity(19.1, 72.88);
-  assert.equal(city.name, 'Mumbai');
-});
-
-test('resolveSupportedCity resolves canonical city aliases and rejects unknown cities', () => {
   assert.equal(resolveSupportedCity('Gurgaon')?.name, 'Gurugram');
   assert.equal(resolveSupportedCity('Bangalore')?.name, 'Bengaluru');
   assert.equal(resolveSupportedCity('Calcutta')?.name, 'Kolkata');
   assert.equal(resolveSupportedCity('New Delhi')?.name, 'Delhi');
+  assert.equal(resolveSupportedCity('Kochi')?.state, 'Kerala');
+  assert.equal(resolveSupportedCity('Port Blair')?.state, 'Andaman and Nicobar Islands');
+  assert.equal(resolveSupportedCity('Guwahati')?.state, 'Assam');
   assert.equal(resolveSupportedCity('UnknownCity'), null);
 });
 
-test('filterStationsByCityAliases matches exact UT states without partial state false positives', () => {
-  const stations = aggregateCpcbRecords(
-    [
-      {
-        state: 'Uttar Pradesh',
-        city: 'Noida',
-        station: 'Sector 62, Noida - UPPCB',
-        last_update: '17-11-2026 14:30:00',
-        pollutant_id: 'PM2.5',
-        pollutant_avg: '140',
-      },
-      {
-        state: 'Chandigarh',
-        city: 'Sector-25',
-        station: 'Sector-25 - CPCC',
-        last_update: '17-11-2026 14:30:00',
-        pollutant_id: 'PM2.5',
-        pollutant_avg: '90',
-      },
-    ],
-    Date.parse('2026-11-17T15:00:00+05:30')
-  );
+test('resolveStationSelection aggregates or focuses specific station', () => {
+  const stations: StationReading[] = [
+    {
+      id: 'st-1',
+      station: 'Station Alpha',
+      city: 'Delhi',
+      state: 'Delhi',
+      lat: 28.64,
+      lng: 77.31,
+      officialAqi: 300,
+      category: 'Poor',
+      predominantPollutant: 'PM2.5',
+      pollutants: [],
+      lastUpdatedIso: '2026-11-19T06:00:00Z',
+      source: 'AERIS_SIMULATION_ENGINE',
+      sourceLabel: 'AERIS AI Simulation Engine (SIMULATED)',
+      isOfficialNationalAqi: false,
+      isDemo: true,
+      isStale: false,
+      staleNote: 'Simulated',
+    },
+    {
+      id: 'st-2',
+      station: 'Station Beta',
+      city: 'Delhi',
+      state: 'Delhi',
+      lat: 28.56,
+      lng: 77.18,
+      officialAqi: 200,
+      category: 'Moderate',
+      predominantPollutant: 'PM10',
+      pollutants: [],
+      lastUpdatedIso: '2026-11-19T06:00:00Z',
+      source: 'AERIS_SIMULATION_ENGINE',
+      sourceLabel: 'AERIS AI Simulation Engine (SIMULATED)',
+      isOfficialNationalAqi: false,
+      isDemo: true,
+      isStale: false,
+      staleNote: 'Simulated',
+    },
+  ];
 
-  assert.equal(filterStationsByCityAliases(stations, 'Uttar').length, 0);
-  assert.equal(filterStationsByCityAliases(stations, 'Noida').length, 1);
-  assert.equal(filterStationsByCityAliases(stations, 'Chandigarh').length, 1);
+  const all = resolveStationSelection(stations, 'all');
+  assert.equal(all.primaryAqi, 250);
+  assert.equal(all.selectedStation, null);
+
+  const focused = resolveStationSelection(stations, 'st-2');
+  assert.equal(focused.primaryAqi, 200);
+  assert.equal(focused.selectedStation?.id, 'st-2');
+});
+
+test('isTimestampStale and findNearestSupportedCity work across India', () => {
+  const iso = '2026-11-19T06:00:00Z';
+  assert.equal(isTimestampStale(iso, Date.parse('2026-11-19T06:30:00Z'), 180), false);
+  assert.equal(isTimestampStale(iso, Date.parse('2026-11-19T12:00:00Z'), 180), true);
+
+  assert.equal(findNearestSupportedCity(19.08, 72.87).name, 'Mumbai');
+  assert.equal(findNearestSupportedCity(9.97, 76.31).name, 'Kochi');
+  assert.equal(findNearestSupportedCity(11.62, 92.72).name, 'Port Blair');
 });

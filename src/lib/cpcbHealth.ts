@@ -273,7 +273,7 @@ export function buildCpcbHealthRecommendation(params: {
   );
   const isMissing = aqiValue === null || meta.category === 'Unavailable';
   const isLiveVerified = Boolean(
-    aqiData && aqiData.hasOfficialData && aqiData.dataMode === 'live' && !isMissing && !isStale
+    aqiData && aqiData.hasOfficialData && !isDemo && !isMissing && !isStale
   );
 
   const sensitiveActive =
@@ -330,15 +330,15 @@ export function buildCpcbHealthRecommendation(params: {
   const dataLimitations: string[] = [];
   if (!aqiData) {
     dataLimitations.push(
-      'Telemetry feed has not finished loading; no verified live monitoring measurement is currently active.'
+      'Telemetry has not finished loading yet.'
     );
   } else if (isDemo) {
     dataLimitations.push(
-      'Demo Reference Mode: official CPCB live feed credentials are unavailable or unreachable, so baseline reference figures are displayed instead of real-time readings.'
+      'SIMULATED DATA · DEMO MODE (AERIS AI Simulation Engine): These readings are generated for demonstration and are not actual environmental measurements.'
     );
   } else if (isStale) {
     dataLimitations.push(
-      `Stale Monitoring Timestamp: latest observation (${observedTimestampDisplay}) is older than the 3-hour freshness threshold and may not reflect rapid local shifts.`
+      `Stale Timestamp: latest snapshot (${observedTimestampDisplay}) is older than 3 hours.`
     );
   }
   if (isMissing) {
@@ -346,37 +346,20 @@ export function buildCpcbHealthRecommendation(params: {
       'Incomplete Pollutant Coverage: fewer than 3 CPCB-compatible pollutants (with PM2.5 or PM10) were reported for this selection.'
     );
   }
-  if (aqiData?.hasOpenAqData) {
-    dataLimitations.push(
-      'OpenAQ v3 Sensor Distinction: supplementary OpenAQ v3 raw sensor concentrations are shown separately and are never converted into official Indian National AQI.'
-    );
-  }
   dataLimitations.push(
-    'Spatial & Temporal Scope: fixed CAAQMS/CPCB ambient monitors represent point-in-time station averages and cannot measure hyper-local traffic kerbside plumes, indoor smoke, or future AQI forecasts.'
+    'Demonstration Scope: simulated city and station readings follow India’s 6-tier CPCB AQI category thresholds for educational demonstration only and do not represent live sensor readings or future forecasts.'
   );
 
   const sourceCitations: CpcbHealthCitation[] = [
     {
-      title: 'Central Pollution Control Board (CPCB) — National Air Quality Index (NAQI)',
-      detail: `Official 6-tier AQI breakpoints & health impact table (${band.category}: ${band.rangeLabel}).`,
+      title: 'CPCB National Air Quality Index (NAQI) Category Reference',
+      detail: `6-tier AQI category breakpoints & health impact reference (${band.category}: ${band.rangeLabel}) used for demonstration.`,
     },
-    aqiData && aqiData.hasOfficialData
-      ? {
-          title: 'CPCB Real-Time AQI Telemetry (data.gov.in)',
-          detail: `${stationName} · Observed ${observedTimestampDisplay} (${freshnessLabel}).`,
-        }
-      : {
-          title: 'AERIS AI Demo Reference Profile (Fallback — Not Live CPCB)',
-          detail: `${stationName} · Reference timestamp ${observedTimestampDisplay}.`,
-        },
+    {
+      title: 'AERIS AI Simulation Engine (SIMULATED DATA · DEMO MODE)',
+      detail: `${stationName} · Simulated interval timestamp ${observedTimestampDisplay} (${freshnessLabel}). Not actual environmental measurements.`,
+    },
   ];
-
-  if (aqiData && aqiData.hasOpenAqData && aqiData.openAqSensors.length > 0) {
-    sourceCitations.push({
-      title: 'OpenAQ v3 Sensor Network (Supplementary Only)',
-      detail: `${aqiData.openAqSensors.length} raw sensor reading(s) displayed separately without CPCB conversion.`,
-    });
-  }
 
   return {
     category: meta.category,

@@ -1,9 +1,45 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { AlertTriangle, MapPin, RefreshCw, Search } from 'lucide-react';
-import { AqiStatusText } from '../components/AqiBadge.tsx';
+import {
+  lazy,
+  Suspense,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
+import {
+  Database,
+  Globe2,
+  LocateFixed,
+  Maximize2,
+  RefreshCw,
+  Search,
+  X,
+} from 'lucide-react';
+import type {
+  IndiaStationMapHandle,
+  MapBasemapMode,
+} from '../components/IndiaStationMap.tsx';
 import { MapSkeleton } from '../components/SkeletonCards.tsx';
-import { classifyCpcbAqi, formatFreshnessLabel } from '../lib/aqi.ts';
-import type { AqiCategory, StationReading } from '../lib/types.ts';
+import {
+  SIMULATION_BADGE_TEXT,
+  SIMULATION_DATA_SOURCE,
+  SIMULATION_DISCLAIMER_TEXT,
+  toStationReading,
+} from '../lib/indiaSimulation.ts';
+import {
+  filterMapStations,
+  MAP_CPCB_MARKER_SPECS,
+} from '../lib/mapUtils.ts';
+import type {
+  AqiCategory,
+  IndiaAqiApiResponse,
+  StationReading,
+} from '../lib/types.ts';
+
+const LazyIndiaStationMap = lazy(
+  () => import('../components/IndiaStationMap.tsx')
+);
 
 interface PollutionMapPageProps {
   activeCity: string;
@@ -18,35 +54,41 @@ const CATEGORIES: ('All' | AqiCategory)[] = [
   'Poor',
   'Very Poor',
   'Severe',
-  'Unavailable',
 ];
-
-// Project India lat/lng bounds (67°E–98°E, 7°N–37°N) to SVG 640x680 viewBox
-function projectIndia(lat: number, lng: number): { x: number; y: number } {
-  const minLng = 67;
-  const maxLng = 98;
-  const minLat = 7;
-  const maxLat = 37;
-  const x = ((lng - minLng) / (maxLng - minLng)) * 560 + 40;
-  const y = ((maxLat - lat) / (maxLat - minLat)) * 600 + 40;
-  return { x, y };
-}
 
 export function PollutionMapPage({
   activeCity,
   onSelectCity,
 }: PollutionMapPageProps) {
   const [stations, setStations] = useState<StationReading[]>([]);
-  const [dataMode, setDataMode] = useState<'live' | 'demo'>('demo');
-  const [disclaimer, setDisclaimer] = useState('');
+  const [stateOptions, setStateOptions] = useState<
+    { name: string; code: string; isUnionTerritory: boolean }[]
+  >([]);
+  const [summaryMeta, setSummaryMeta] = useState<{
+    statesCovered: number;
+    unionTerritoriesCovered: number;
+    generatedAt: string;
+  }>({
+    statesCovered: 28,
+    unionTerritoriesCovered: 8,
+    generatedAt: '',
+  });
+
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
   const [searchQuery, setSearchQuery] = useState('');
+  const [stateFilter, setStateFilter] = useState<string>('All');
   const [categoryFilter, setCategoryFilter] = useState<'All' | AqiCategory>('All');
+  const [cityScopeActive, setCityScopeActive] = useState(false);
+  const [basemap, setBasemap] = useState<MapBasemapMode>('dark');
+  const [isFullscreen, setIsFullscreen] = useState(false);
   const [selectedStation, setSelectedStation] = useState<StationReading | null>(
     null
   );
+
   const abortRef = useRef<AbortController | null>(null);
+  const mapHandleRef = useRef<IndiaStationMapHandle | null>(null);
 
   const loadStations = useCallback(async () => {
     abortRef.current?.abort();
@@ -56,7 +98,7 @@ export function PollutionMapPage({
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch('/api/aqi/all', { signal: controller.signal });
+      const res = await fetch('/api/india/aqi', { signal: controller.signal });
       if (!res.ok) {
         let serverError = `HTTP ${res.status}`;
         try {
@@ -67,23 +109,38 @@ export function PollutionMapPage({
         }
         throw new Error(serverError);
       }
-      const json = (await res.json()) as {
-        dataMode: 'live' | 'demo';
-        stations: StationReading[];
-        disclaimer: string;
-      };
-      setStations(json.stations);
-      setDataMode(json.dataMode);
-      setDisclaimer(json.disclaimer);
-      const match =
-        json.stations.find(
-          (s) => s.city.toLowerCase() === activeCity.toLowerCase()
-        ) ?? json.stations[0] ?? null;
-      setSelectedStation(match);
+      const json = (await res.json()) as IndiaAqiApiResponse;
+      const mapped = Array.isArray(json.stations)
+        ? json.stations.map(toStationReading)
+        : [];
+
+      setStations(mapped);
+      setStateOptions(Array.isArray(json.states) ? json.states : []);
+      if (json.summary) {
+        setSummaryMeta({
+          statesCovered: json.summary.statesCovered,
+          unionTerritoriesCovered: json.summary.unionTerritoriesCovered,
+          generatedAt: json.summary.generatedAt,
+        });
+      }
+
+      setSelectedStation((prev) => {
+        if (prev) {
+          const refreshed = mapped.find((s) => s.id === prev.id);
+          if (refreshed) return refreshed;
+        }
+        return (
+          mapped.find((s) => s.city.toLowerCase() === activeCity.toLowerCase()) ??
+          mapped[0] ??
+          null
+        );
+      });
     } catch (err) {
       if (err instanceof Error && err.name === 'AbortError') return;
       setError(
-        err instanceof Error ? err.message : 'Unable to load station map.'
+        err instanceof Error
+          ? err.message
+          : 'Unable to load simulated India AQI map.'
       );
     } finally {
       setLoading(false);
@@ -97,329 +154,460 @@ export function PollutionMapPage({
     };
   }, [loadStations]);
 
-  const filtered = useMemo(() => {
-    const q = searchQuery.trim().toLowerCase();
-    return stations.filter((s) => {
-      if (categoryFilter !== 'All' && s.category !== categoryFilter) {
-        return false;
+  useEffect(() => {
+    if (!isFullscreen) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setIsFullscreen(false);
       }
-      if (!q) return true;
-      return (
-        s.station.toLowerCase().includes(q) ||
-        s.city.toLowerCase().includes(q) ||
-        s.state.toLowerCase().includes(q)
-      );
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [isFullscreen]);
+
+  const filteredStations = useMemo(() => {
+    return filterMapStations(stations, {
+      query: searchQuery,
+      category: categoryFilter,
+      state: stateFilter === 'All' ? null : stateFilter,
+      cityOnly: cityScopeActive ? activeCity : null,
     });
-  }, [stations, searchQuery, categoryFilter]);
+  }, [stations, searchQuery, categoryFilter, stateFilter, cityScopeActive, activeCity]);
+
+  const categoryCounts = useMemo(() => {
+    const base = filterMapStations(stations, {
+      query: searchQuery,
+      category: 'All',
+      state: stateFilter === 'All' ? null : stateFilter,
+      cityOnly: cityScopeActive ? activeCity : null,
+    });
+    const counts: Record<'All' | AqiCategory, number> = {
+      All: base.length,
+      Good: 0,
+      Satisfactory: 0,
+      Moderate: 0,
+      Poor: 0,
+      'Very Poor': 0,
+      Severe: 0,
+      Unavailable: 0,
+    };
+    for (const st of base) {
+      counts[st.category] = (counts[st.category] ?? 0) + 1;
+    }
+    return counts;
+  }, [stations, searchQuery, stateFilter, cityScopeActive, activeCity]);
+
+  const handleStateFilterChange = (nextState: string) => {
+    setStateFilter(nextState);
+    setCityScopeActive(false);
+    const matching = filterMapStations(stations, {
+      query: searchQuery,
+      category: categoryFilter,
+      state: nextState === 'All' ? null : nextState,
+    });
+    if (nextState === 'All') {
+      mapHandleRef.current?.resetView();
+    } else if (matching.length > 0) {
+      mapHandleRef.current?.fitStations(matching);
+      setSelectedStation(matching[0]);
+    }
+  };
+
+  const handleShowMyActiveCity = () => {
+    setSearchQuery('');
+    setStateFilter('All');
+    setCategoryFilter('All');
+    setCityScopeActive(true);
+    const matching = filterMapStations(stations, {
+      cityOnly: activeCity,
+    });
+    mapHandleRef.current?.focusCity(activeCity, matching);
+    if (matching.length > 0) {
+      setSelectedStation(matching[0]);
+    }
+  };
+
+  const handleShowAllIndia = () => {
+    setSearchQuery('');
+    setStateFilter('All');
+    setCategoryFilter('All');
+    setCityScopeActive(false);
+    mapHandleRef.current?.resetView();
+  };
+
+  const handleSelectStationFromList = (station: StationReading) => {
+    setSelectedStation(station);
+    mapHandleRef.current?.focusStation(station);
+  };
+
+  const handleSearchSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (filteredStations.length > 0) {
+      const first = filteredStations[0];
+      setSelectedStation(first);
+      mapHandleRef.current?.focusStation(first);
+    }
+  };
+
+  const statesOnly = useMemo(
+    () => stateOptions.filter((s) => !s.isUnionTerritory),
+    [stateOptions]
+  );
+  const utsOnly = useMemo(
+    () => stateOptions.filter((s) => s.isUnionTerritory),
+    [stateOptions]
+  );
 
   return (
-    <div className="space-y-6">
-      {/* Header Controls */}
-      <div className="aeris-panel rounded-xl p-5 flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
-        <div>
-          <h2 className="text-lg font-semibold text-slate-100">
-            India Air Monitoring Station Map
-          </h2>
-          <p className="text-xs text-slate-400 mt-1">
-            {disclaimer ||
-              (dataMode === 'live'
-                ? 'Live CPCB station markers'
-                : 'Demo Reference Markers (Not Live)')}
-          </p>
-        </div>
-
-        <div className="flex flex-wrap items-center gap-3">
-          <div className="relative">
-            <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
-            <input
-              type="search"
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="Search city or station..."
-              aria-label="Search monitoring station"
-              className="pl-9 pr-3 py-2 rounded-lg aeris-input text-sm text-slate-100 placeholder:text-slate-500"
-            />
+    <div className="space-y-4">
+      {/* Transparent Simulation Notice Banner */}
+      <div
+        role="status"
+        data-testid="map-simulation-banner"
+        className="rounded-xl border border-amber-500/35 bg-amber-500/8 px-4 py-3 flex flex-col lg:flex-row lg:items-center lg:justify-between gap-2.5"
+      >
+        <div className="flex items-start sm:items-center gap-2.5 min-w-0 text-xs">
+          <Database className="w-4 h-4 text-amber-300 shrink-0 mt-0.5 sm:mt-0" />
+          <div className="min-w-0">
+            <span className="inline-flex items-center px-2 py-0.5 rounded bg-amber-500/20 border border-amber-400/40 font-mono text-[11px] font-semibold text-amber-200 mr-2">
+              {SIMULATION_BADGE_TEXT}
+            </span>
+            <span className="text-slate-200">{SIMULATION_DISCLAIMER_TEXT}</span>
           </div>
-
-          <select
-            value={categoryFilter}
-            onChange={(e) =>
-              setCategoryFilter(e.target.value as 'All' | AqiCategory)
-            }
-            aria-label="Filter by CPCB category"
-            className="px-3 py-2 rounded-lg aeris-input text-sm text-slate-100"
-          >
-            {CATEGORIES.map((cat) => (
-              <option key={cat} value={cat}>
-                Category: {cat}
-              </option>
-            ))}
-          </select>
-
-          <button
-            type="button"
-            onClick={() => void loadStations()}
-            disabled={loading}
-            className="inline-flex items-center gap-2 px-3 py-2 rounded-lg border border-slate-700 bg-[#070D1D] text-sm text-slate-200 hover:border-cyan-500/40 hover:text-cyan-200 disabled:opacity-60 transition-colors"
-          >
-            <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
-            <span>Reload</span>
-          </button>
+        </div>
+        <div className="text-[11px] font-mono tabular-nums text-slate-400 shrink-0">
+          {SIMULATION_DATA_SOURCE} · {summaryMeta.statesCovered} States &amp;{' '}
+          {summaryMeta.unionTerritoriesCovered} UTs
         </div>
       </div>
 
-      {error && stations.length > 0 && (
+      {/* Main Controls Header */}
+      <section className="aeris-panel rounded-xl p-3.5 sm:p-4 space-y-3">
+        <div className="flex flex-col xl:flex-row xl:items-center xl:justify-between gap-3">
+          <div className="min-w-0">
+            <h2 className="text-base sm:text-lg font-semibold text-slate-100 leading-tight">
+              India Air Monitoring Station Map
+            </h2>
+            <p className="text-xs text-slate-400 mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5">
+              <span>
+                All {summaryMeta.statesCovered} States &amp;{' '}
+                {summaryMeta.unionTerritoriesCovered} Union Territories
+              </span>
+              <span aria-hidden="true">·</span>
+              <span className="font-mono tabular-nums text-slate-300">
+                Showing {filteredStations.length} of {stations.length} stations
+              </span>
+              {stateFilter !== 'All' && (
+                <>
+                  <span aria-hidden="true">·</span>
+                  <span className="text-cyan-300">State/UT: {stateFilter}</span>
+                </>
+              )}
+              {cityScopeActive && (
+                <>
+                  <span aria-hidden="true">·</span>
+                  <span className="text-cyan-300">Scoped to {activeCity}</span>
+                </>
+              )}
+            </p>
+          </div>
+
+          {/* Search + State Filter + Single-Line Compact Map Controls */}
+          <div className="flex flex-wrap items-center gap-2">
+            <form
+              onSubmit={handleSearchSubmit}
+              className="relative flex-1 sm:flex-none min-w-[160px]"
+            >
+              <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+              <input
+                type="search"
+                value={searchQuery}
+                onChange={(e) => {
+                  setSearchQuery(e.target.value);
+                  if (cityScopeActive) setCityScopeActive(false);
+                }}
+                placeholder="Search city, state, station..."
+                aria-label="Search city, state, or monitoring station"
+                className="w-full sm:w-48 pl-8 pr-7 py-1.5 rounded-lg aeris-input text-xs text-slate-100 placeholder:text-slate-500 min-h-[38px]"
+              />
+              {searchQuery && (
+                <button
+                  type="button"
+                  onClick={() => setSearchQuery('')}
+                  aria-label="Clear search"
+                  className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-200 p-0.5"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              )}
+            </form>
+
+            <select
+              aria-label="Filter by Indian State or Union Territory"
+              data-testid="map-state-filter"
+              value={stateFilter}
+              onChange={(e) => handleStateFilterChange(e.target.value)}
+              className="px-2.5 py-1.5 rounded-lg aeris-input text-xs text-slate-100 min-h-[38px] max-w-[210px]"
+            >
+              <option value="All">All 28 States &amp; 8 UTs</option>
+              <optgroup label="States (28)">
+                {statesOnly.map((st) => (
+                  <option key={st.code} value={st.name}>
+                    {st.name} ({st.code})
+                  </option>
+                ))}
+              </optgroup>
+              <optgroup label="Union Territories (8)">
+                {utsOnly.map((ut) => (
+                  <option key={ut.code} value={ut.name}>
+                    {ut.name} ({ut.code})
+                  </option>
+                ))}
+              </optgroup>
+            </select>
+
+            <button
+              type="button"
+              onClick={handleShowMyActiveCity}
+              className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border text-xs font-medium transition-colors min-h-[38px] whitespace-nowrap ${
+                cityScopeActive
+                  ? 'border-cyan-400/55 bg-cyan-500/15 text-cyan-200'
+                  : 'border-slate-700 bg-[#070D1D] text-slate-200 hover:border-cyan-500/40 hover:text-cyan-200'
+              }`}
+            >
+              <LocateFixed className="w-3.5 h-3.5 text-cyan-400" />
+              <span>My City ({activeCity})</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={handleShowAllIndia}
+              className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border text-xs font-medium transition-colors min-h-[38px] whitespace-nowrap ${
+                !cityScopeActive &&
+                stateFilter === 'All' &&
+                categoryFilter === 'All' &&
+                !searchQuery
+                  ? 'border-cyan-400/45 bg-cyan-500/10 text-cyan-200'
+                  : 'border-slate-700 bg-[#070D1D] text-slate-200 hover:border-cyan-500/40 hover:text-cyan-200'
+              }`}
+            >
+              <Globe2 className="w-3.5 h-3.5 text-cyan-400" />
+              <span>All India</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setIsFullscreen((prev) => !prev)}
+              className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-slate-700 bg-[#070D1D] text-xs font-medium text-slate-200 hover:border-cyan-500/40 hover:text-cyan-200 transition-colors min-h-[38px] whitespace-nowrap"
+            >
+              <Maximize2 className="w-3.5 h-3.5" />
+              <span>Full Screen</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => void loadStations()}
+              disabled={loading}
+              aria-label="Reload simulated stations"
+              className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-slate-700 bg-[#070D1D] text-xs font-medium text-slate-200 hover:border-cyan-500/40 hover:text-cyan-200 disabled:opacity-60 transition-colors min-h-[38px] whitespace-nowrap"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
+              <span className="sr-only sm:not-sr-only">Refresh</span>
+            </button>
+          </div>
+        </div>
+
+        {/* Interactive AQI Category Filter Strip */}
+        <div
+          role="group"
+          aria-label="Filter stations by CPCB AQI category"
+          className="flex items-center gap-1.5 overflow-x-auto pb-0.5 pt-2 border-t border-slate-800/80"
+        >
+          {CATEGORIES.map((cat) => {
+            const isActive = categoryFilter === cat;
+            const spec = cat === 'All' ? null : MAP_CPCB_MARKER_SPECS[cat];
+            const count = categoryCounts[cat] ?? 0;
+            return (
+              <button
+                key={cat}
+                type="button"
+                onClick={() => setCategoryFilter(cat)}
+                aria-pressed={isActive}
+                className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium transition-colors whitespace-nowrap shrink-0 min-h-[34px] ${
+                  isActive
+                    ? 'bg-cyan-500/18 text-cyan-100 border border-cyan-400/50'
+                    : 'bg-[#070D1D] text-slate-300 border border-slate-800 hover:border-slate-600 hover:text-slate-100'
+                }`}
+              >
+                {spec && (
+                  <span
+                    className="w-2 h-2 rounded-full shrink-0"
+                    style={{ backgroundColor: spec.fillHex }}
+                    aria-hidden="true"
+                  />
+                )}
+                <span>{cat}</span>
+                <span className="font-mono tabular-nums text-[11px] text-slate-400">
+                  {count}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      </section>
+
+      {/* Network Error Banner */}
+      {error && (
         <div
           role="alert"
           className="rounded-xl border border-rose-500/40 bg-rose-500/10 px-4 py-3 flex flex-wrap items-center justify-between gap-3 text-xs text-rose-200"
         >
-          <span>Map reload failed ({error}). Showing previously loaded markers.</span>
+          <span>Simulated India AQI request failed ({error}).</span>
           <button
             type="button"
             onClick={() => void loadStations()}
             className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-rose-400/40 bg-rose-500/15 font-medium text-rose-100 hover:bg-rose-500/25"
           >
             <RefreshCw className="w-3.5 h-3.5" />
-            <span>Retry Map</span>
+            <span>Retry</span>
           </button>
         </div>
       )}
 
+      {/* Main Geospatial Map Viewport */}
       {loading && stations.length === 0 ? (
         <MapSkeleton />
-      ) : error && stations.length === 0 ? (
-        <div className="aeris-panel rounded-xl p-10 text-center space-y-4 max-w-xl mx-auto">
-          <div className="w-11 h-11 rounded-xl bg-rose-500/10 border border-rose-500/30 flex items-center justify-center mx-auto">
-            <AlertTriangle className="w-5 h-5 text-rose-400" />
-          </div>
-          <p className="text-sm font-medium text-rose-200">{error}</p>
-          <button
-            type="button"
-            onClick={() => void loadStations()}
-            className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-cyan-500 text-slate-950 font-semibold text-sm hover:bg-cyan-400 transition-colors"
-          >
-            <RefreshCw className="w-4 h-4" />
-            <span>Retry Map</span>
-          </button>
-        </div>
       ) : (
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-          {/* Interactive Geospatial Station Plot */}
-          <div className="lg:col-span-7 aeris-panel rounded-xl p-5 flex flex-col">
-            <div className="flex items-center justify-between text-xs text-slate-400 mb-3">
-              <span>Interactive India Station Coordinates (67°E–98°E, 7°N–37°N)</span>
-              <span className="font-mono tabular-nums">
-                Showing {filtered.length} markers
-              </span>
-            </div>
+        <Suspense fallback={<MapSkeleton />}>
+          <LazyIndiaStationMap
+            ref={mapHandleRef}
+            stations={filteredStations}
+            selectedStation={selectedStation}
+            onSelectStation={setSelectedStation}
+            onSetActiveCity={onSelectCity}
+            activeCity={activeCity}
+            basemap={basemap}
+            onBasemapChange={setBasemap}
+            isFullscreen={isFullscreen}
+            onToggleFullscreen={() => setIsFullscreen((prev) => !prev)}
+            hasAnyStations={stations.length > 0}
+            onResetFilters={handleShowAllIndia}
+          />
+        </Suspense>
+      )}
 
-            <div className="relative flex-1 min-h-[420px] rounded-lg bg-[#050A17] border border-cyan-500/20 overflow-hidden">
-              <svg
-                viewBox="0 0 640 680"
-                className="w-full h-full max-h-[540px]"
-                role="img"
-                aria-label="Map of Indian air quality monitoring stations"
-              >
-                {/* Graticule grid */}
-                {[120, 240, 360, 480].map((x) => (
-                  <line
-                    key={`vx-${x}`}
-                    x1={x}
-                    y1={20}
-                    x2={x}
-                    y2={660}
-                    stroke="rgba(148,163,184,0.08)"
-                  />
-                ))}
-                {[140, 280, 420, 560].map((y) => (
-                  <line
-                    key={`hy-${y}`}
-                    x1={20}
-                    y1={y}
-                    x2={620}
-                    y2={y}
-                    stroke="rgba(148,163,184,0.08)"
-                  />
-                ))}
-
-                {/* Coordinate-aligned India silhouette (67°E-98°E, 7°N-37°N) */}
-                <path
-                  d="M 192 58 L 245 48 L 285 95 L 308 152 L 385 212 L 455 216 L 510 198 L 575 210 L 588 265 L 542 328 L 485 308 L 462 355 L 408 392 L 352 458 L 305 538 L 260 618 L 236 626 L 208 552 L 178 468 L 146 384 L 94 335 L 72 292 L 106 254 L 154 218 L 166 154 Z"
-                  fill="rgba(22, 56, 89, 0.35)"
-                  stroke="rgba(56, 189, 248, 0.4)"
-                  strokeWidth="2"
-                />
-
-                {filtered.map((st) => {
-                  const { x, y } = projectIndia(st.lat, st.lng);
-                  const meta = classifyCpcbAqi(st.officialAqi);
-                  const isSelected = selectedStation?.id === st.id;
-                  return (
-                    <g key={st.id}>
-                      <circle
-                        cx={x}
-                        cy={y}
-                        r={isSelected ? 14 : 9}
-                        fill={meta.accentHex}
-                        fillOpacity={isSelected ? 0.35 : 0.22}
-                      />
-                      <circle
-                        cx={x}
-                        cy={y}
-                        r={isSelected ? 7 : 5}
-                        fill={meta.accentHex}
-                        stroke="#060A13"
-                        strokeWidth={1.5}
-                        role="button"
-                        tabIndex={0}
-                        aria-label={`${st.station}, ${st.city}, AQI ${st.officialAqi ?? 'Unavailable'}`}
-                        aria-pressed={isSelected}
-                        className="cursor-pointer focus:outline-none focus:stroke-cyan-300 focus:stroke-2"
-                        onClick={() => setSelectedStation(st)}
-                        onKeyDown={(e) => {
-                          if (e.key === 'Enter' || e.key === ' ') {
-                            e.preventDefault();
-                            setSelectedStation(st);
-                          }
-                        }}
-                      />
-                      {isSelected && (
-                        <text
-                          x={x + 12}
-                          y={y + 4}
-                          fill="#F1F5F9"
-                          fontSize="12"
-                          fontFamily="DM Sans, sans-serif"
-                          fontWeight="600"
-                        >
-                          {st.city} ({st.officialAqi ?? 'N/A'})
-                        </text>
-                      )}
-                    </g>
-                  );
-                })}
-              </svg>
-            </div>
+      {/* Nationwide Station Directory */}
+      <section className="aeris-panel rounded-xl p-4 sm:p-5 space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <h3 className="text-sm font-semibold text-slate-100">
+              India Simulated Station Directory ({filteredStations.length})
+            </h3>
+            <p className="text-xs text-slate-400 mt-0.5">
+              Select any station to pan the map and inspect simulated pollutant
+              metrics ({SIMULATION_DATA_SOURCE}).
+            </p>
           </div>
+          {(searchQuery ||
+            stateFilter !== 'All' ||
+            categoryFilter !== 'All' ||
+            cityScopeActive) && (
+            <button
+              type="button"
+              onClick={handleShowAllIndia}
+              className="text-xs font-medium text-cyan-300 hover:text-cyan-200 whitespace-nowrap"
+            >
+              Reset filters
+            </button>
+          )}
+        </div>
 
-          {/* Selected Station Inspector + Scrollable Station List */}
-          <div className="lg:col-span-5 space-y-4">
-            {selectedStation ? (
-              <section className="aeris-panel rounded-xl p-5 space-y-4">
-                <div className="flex items-start justify-between gap-3">
-                  <div>
-                    <p className="text-xs text-cyan-400 font-medium">
-                      Selected Station Telemetry
-                    </p>
-                    <h3 className="text-base font-semibold text-slate-100 mt-0.5">
-                      {selectedStation.station}
-                    </h3>
-                    <p className="text-xs text-slate-400 mt-0.5">
-                      {selectedStation.city}, {selectedStation.state} ·{' '}
-                      <span className="font-mono tabular-nums">
-                        {selectedStation.lat.toFixed(3)}°N,{' '}
-                        {selectedStation.lng.toFixed(3)}°E
-                      </span>
-                    </p>
-                  </div>
-                  <div className="text-right">
-                    <span className="text-3xl font-bold font-mono tabular-nums text-slate-50">
-                      {selectedStation.officialAqi ?? 'N/A'}
-                    </span>
-                    <p className="text-[11px] text-slate-400">CPCB AQI</p>
-                  </div>
-                </div>
+        {filteredStations.length === 0 ? (
+          <div className="py-8 text-center text-xs text-slate-400 border-t border-slate-800/80">
+            No simulated stations match the active search, state, or AQI category
+            filter.
+          </div>
+        ) : (
+          <div className="overflow-x-auto border-t border-slate-800/80">
+            <table className="w-full text-left border-collapse">
+              <thead>
+                <tr className="border-b border-slate-800/80 text-[11px] font-medium text-slate-400">
+                  <th className="py-2.5 pr-4">Station</th>
+                  <th className="py-2.5 px-3">City / District</th>
+                  <th className="py-2.5 px-3">State / UT</th>
+                  <th className="py-2.5 px-3 text-right">Simulated AQI</th>
+                  <th className="py-2.5 px-3 text-right">PM2.5</th>
+                  <th className="py-2.5 pl-3 text-right">Type</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-800/70 text-xs">
+                {filteredStations.map((st) => {
+                  const isSelected = selectedStation?.id === st.id;
+                  const spec =
+                    MAP_CPCB_MARKER_SPECS[st.category] ??
+                    MAP_CPCB_MARKER_SPECS.Unavailable;
+                  const pm25 = st.pollutants.find((p) => p.id === 'PM2.5');
 
-                <div className="flex flex-wrap items-center justify-between gap-2 py-2 border-y border-slate-800/80 text-xs">
-                  <AqiStatusText aqi={selectedStation.officialAqi} compact />
-                  <span className="text-slate-400 font-mono tabular-nums">
-                    {formatFreshnessLabel(selectedStation.lastUpdatedIso)} ·{' '}
-                    {selectedStation.isStale ? 'Stale' : 'Fresh'}
-                  </span>
-                </div>
-
-                <div className="grid grid-cols-3 gap-2">
-                  {selectedStation.pollutants.slice(0, 6).map((p) => (
-                    <div
-                      key={p.id}
-                      className="p-2.5 rounded-lg bg-[#080E1C] border border-slate-800/80"
+                  return (
+                    <tr
+                      key={st.id}
+                      onClick={() => handleSelectStationFromList(st)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' || e.key === ' ') {
+                          e.preventDefault();
+                          handleSelectStationFromList(st);
+                        }
+                      }}
+                      tabIndex={0}
+                      role="button"
+                      className={`cursor-pointer transition-colors focus-visible:outline-none focus-visible:bg-cyan-500/12 ${
+                        isSelected
+                          ? 'bg-cyan-500/12 text-slate-50'
+                          : 'hover:bg-slate-800/45 text-slate-200'
+                      }`}
                     >
-                      <p className="text-[11px] text-slate-400">{p.label}</p>
-                      <p className="text-sm font-mono font-semibold tabular-nums text-slate-100 mt-0.5">
-                        {p.value ?? 'N/A'}{' '}
-                        <span className="text-[10px] text-slate-500">{p.unit}</span>
-                      </p>
-                    </div>
-                  ))}
-                </div>
-
-                <div className="flex items-center justify-between gap-3 pt-1">
-                  <span className="text-xs text-slate-400">
-                    Source: {selectedStation.sourceLabel}
-                  </span>
-                  <button
-                    type="button"
-                    onClick={() => onSelectCity(selectedStation.city)}
-                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-cyan-500 text-slate-950 font-semibold text-xs hover:bg-cyan-400 transition-colors whitespace-nowrap"
-                  >
-                    <MapPin className="w-3.5 h-3.5" />
-                    <span>Set Active City</span>
-                  </button>
-                </div>
-              </section>
-            ) : (
-              <div className="aeris-panel rounded-xl p-6 text-center text-sm text-slate-400">
-                Select a station marker to inspect pollutant concentrations.
-              </div>
-            )}
-
-            <section className="aeris-panel rounded-xl p-4">
-              <h3 className="text-sm font-semibold text-slate-200 mb-3">
-                Station Directory ({filtered.length})
-              </h3>
-              <div className="max-h-72 overflow-y-auto divide-y divide-slate-800/80 pr-1">
-                {filtered.length === 0 ? (
-                  <p className="py-6 text-center text-xs text-slate-400">
-                    No stations match your search or category filter.
-                  </p>
-                ) : (
-                  filtered.map((st) => {
-                    const cat = classifyCpcbAqi(st.officialAqi);
-                    const active = selectedStation?.id === st.id;
-                    return (
-                      <button
-                        key={st.id}
-                        type="button"
-                        onClick={() => setSelectedStation(st)}
-                        className={`w-full text-left py-2.5 px-2.5 rounded-lg flex items-center justify-between gap-3 transition-colors ${
-                          active ? 'bg-cyan-500/10' : 'hover:bg-slate-800/50'
-                        }`}
-                      >
-                        <div className="min-w-0">
-                          <p className="text-xs font-medium text-slate-100 truncate">
-                            {st.station}
-                          </p>
-                          <p className="text-[11px] text-slate-400">
-                            {st.city} · {st.isDemo ? 'Demo' : 'CPCB'}
-                          </p>
-                        </div>
-                        <div className="text-right shrink-0">
-                          <span className="text-sm font-mono font-semibold tabular-nums text-slate-100">
+                      <td className="py-2.5 pr-4 font-medium max-w-[230px] truncate">
+                        {st.station}
+                      </td>
+                      <td className="py-2.5 px-3 text-slate-300 whitespace-nowrap">
+                        {st.city}
+                        {st.district && st.district !== st.city
+                          ? ` (${st.district})`
+                          : ''}
+                      </td>
+                      <td className="py-2.5 px-3 text-slate-400 whitespace-nowrap">
+                        {st.state}
+                        {st.stateCode ? ` · ${st.stateCode}` : ''}
+                      </td>
+                      <td className="py-2.5 px-3 text-right font-mono tabular-nums whitespace-nowrap">
+                        <span className="inline-flex items-center justify-end gap-1.5">
+                          <span
+                            className="w-2 h-2 rounded-full shrink-0"
+                            style={{ backgroundColor: spec.fillHex }}
+                            aria-hidden="true"
+                          />
+                          <span className="font-semibold text-slate-100">
                             {st.officialAqi ?? 'N/A'}
                           </span>
-                          <p className={`text-[11px] ${cat.textClass}`}>
-                            {cat.category}
-                          </p>
-                        </div>
-                      </button>
-                    );
-                  })
-                )}
-              </div>
-            </section>
+                          <span className="text-slate-400">{st.category}</span>
+                        </span>
+                      </td>
+                      <td className="py-2.5 px-3 text-right font-mono tabular-nums whitespace-nowrap text-slate-200">
+                        {pm25?.value !== null && pm25?.value !== undefined
+                          ? `${pm25.value} ${pm25.unit}`
+                          : 'N/A'}
+                      </td>
+                      <td className="py-2.5 pl-3 text-right font-mono tabular-nums whitespace-nowrap text-amber-300">
+                        {st.dataType ?? 'SIMULATED'}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
           </div>
-        </div>
-      )}
+        )}
+      </section>
     </div>
   );
 }

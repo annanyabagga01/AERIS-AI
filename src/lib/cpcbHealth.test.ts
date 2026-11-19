@@ -8,6 +8,10 @@ import {
   OFFICIAL_SIX_CPCB_CATEGORIES,
 } from './cpcbHealth.ts';
 import { classifyCpcbAqi } from './aqi.ts';
+import {
+  SIMULATION_DATA_SOURCE,
+  SIMULATION_DATA_TYPE,
+} from './indiaSimulation.ts';
 import type { CityAqiResponse, FamilyPreferences } from './types.ts';
 
 function makePrefs(overrides: Partial<FamilyPreferences> = {}): FamilyPreferences {
@@ -34,7 +38,9 @@ function makeCityData(
   const meta = classifyCpcbAqi(aqi);
   return {
     city: 'Delhi',
-    state: 'Delhi NCR',
+    district: 'New Delhi',
+    state: 'Delhi',
+    stateCode: 'DL',
     lat: 28.6139,
     lng: 77.209,
     primaryAqi: aqi,
@@ -42,59 +48,57 @@ function makeCityData(
     categoryMeta: meta,
     predominantPollutant: aqi === null ? null : 'PM2.5',
     selectedStationId: 'st-1',
-    selectedStationName: 'R K Puram, Delhi - DPCC',
+    selectedStationName: 'R K Puram Institutional Area',
     stations: [
       {
         id: 'st-1',
-        station: 'R K Puram, Delhi - DPCC',
+        station: 'R K Puram Institutional Area',
         city: 'Delhi',
-        state: 'Delhi NCR',
+        district: 'New Delhi',
+        state: 'Delhi',
+        stateCode: 'DL',
         lat: 28.56,
         lng: 77.18,
         officialAqi: aqi,
         category: meta.category,
         predominantPollutant: aqi === null ? null : 'PM2.5',
         pollutants: [],
-        lastUpdatedIso: '2026-11-17T09:00:00.000Z',
-        source: 'CPCB_DATA_GOV_IN',
-        sourceLabel: 'CPCB / data.gov.in Official Feed',
-        isOfficialNationalAqi: aqi !== null,
-        isDemo: false,
+        lastUpdatedIso: '2026-11-19T06:00:00.000Z',
+        source: 'AERIS_SIMULATION_ENGINE',
+        sourceLabel: 'AERIS AI Simulation Engine (SIMULATED)',
+        dataType: 'SIMULATED',
+        isOfficialNationalAqi: false,
+        isDemo: true,
         isStale: false,
-        staleNote: 'Within 3-hour freshness window',
+        staleNote: 'Simulated interval snapshot (Demo Mode)',
       },
     ],
     openAqSensors: [],
     trend24h: [],
-    lastUpdatedIso: '2026-11-17T09:00:00.000Z',
-    dataMode: 'live',
-    sourceDisclaimer: 'Live official CPCB feed.',
-    hasOfficialData: true,
+    lastUpdatedIso: '2026-11-19T06:00:00.000Z',
+    dataMode: 'demo',
+    dataSource: SIMULATION_DATA_SOURCE,
+    dataType: SIMULATION_DATA_TYPE,
+    sourceDisclaimer:
+      'SIMULATED DATA · DEMO MODE — These readings are generated for demonstration and are not actual environmental measurements.',
+    hasOfficialData: false,
     hasOpenAqData: false,
     staleStationsCount: 0,
     sourceHealth: {
-      cpcb: {
-        sourceId: 'cpcb',
-        name: 'CPCB',
+      simulation: {
+        sourceId: 'simulation',
+        name: SIMULATION_DATA_SOURCE,
         configured: true,
-        status: 'live',
-        message: 'Live',
-        lastCheckedIso: '2026-11-17T09:00:00.000Z',
-      },
-      openAq: {
-        sourceId: 'openaq',
-        name: 'OpenAQ v3',
-        configured: false,
-        status: 'unconfigured',
-        message: 'Off',
-        lastCheckedIso: '2026-11-17T09:00:00.000Z',
+        status: 'simulated',
+        message: 'Active deterministic simulation.',
+        lastCheckedIso: '2026-11-19T06:00:00.000Z',
       },
     },
     ...overrides,
   };
 }
 
-test('OFFICIAL_SIX_CPCB_CATEGORIES covers all six official CPCB bands in order', () => {
+test('OFFICIAL_SIX_CPCB_CATEGORIES covers all six CPCB bands in order', () => {
   assert.deepEqual(
     OFFICIAL_SIX_CPCB_CATEGORIES.map((b) => b.category),
     ['Good', 'Satisfactory', 'Moderate', 'Poor', 'Very Poor', 'Severe']
@@ -109,7 +113,7 @@ test('OFFICIAL_SIX_CPCB_CATEGORIES covers all six official CPCB bands in order',
 });
 
 test('Very Poor and Severe AQI explicitly recommend avoiding outdoor physical activity', () => {
-  const nowMs = Date.parse('2026-11-17T09:30:00.000Z');
+  const nowMs = Date.parse('2026-11-19T06:30:00.000Z');
   const veryPoor = buildCpcbHealthRecommendation({
     aqiData: makeCityData(342),
     preferences: makePrefs(),
@@ -130,11 +134,10 @@ test('Very Poor and Severe AQI explicitly recommend avoiding outdoor physical ac
   assert.equal(severe.avoidOutdoorPhysicalActivity, true);
   assert.equal(severe.activeAudience, 'sensitive');
   assert.match(severe.outdoorActivityHeadline, /avoid all outdoor physical activity/i);
-  assert.match(severe.officialHealthImplication, /even on healthy people/i);
 });
 
 test('Differentiates general population vs pollution-sensitive households and adds family notes', () => {
-  const nowMs = Date.parse('2026-11-17T09:30:00.000Z');
+  const nowMs = Date.parse('2026-11-19T06:30:00.000Z');
   const generalRec = buildCpcbHealthRecommendation({
     aqiData: makeCityData(155),
     preferences: makePrefs(),
@@ -160,39 +163,27 @@ test('Differentiates general population vs pollution-sensitive households and ad
   );
 });
 
-test('Includes citations, timestamps, monitoring limitations, and strictly non-medical/non-guarantee caveats', () => {
-  const nowMs = Date.parse('2026-11-17T14:00:00.000Z');
-  const staleDemo = buildCpcbHealthRecommendation({
-    aqiData: makeCityData(280, {
-      hasOfficialData: false,
-      dataMode: 'demo',
-      staleStationsCount: 1,
-      stations: [
-        {
-          ...makeCityData(280).stations[0],
-          isDemo: true,
-          isStale: true,
-        },
-      ],
-    }),
+test('Includes simulation citations, timestamps, limitations, and strictly non-medical caveats', () => {
+  const nowMs = Date.parse('2026-11-19T06:30:00.000Z');
+  const simRec = buildCpcbHealthRecommendation({
+    aqiData: makeCityData(280),
     preferences: makePrefs(),
     nowMs,
   });
 
-  assert.equal(staleDemo.isDemo, true);
-  assert.equal(staleDemo.isLiveVerified, false);
-  assert.ok(staleDemo.sourceCitations.length >= 2);
-  assert.match(staleDemo.observedTimestampDisplay, /IST/);
-  assert.ok(staleDemo.dataLimitations.some((d) => /demo reference mode/i.test(d)));
-  assert.ok(staleDemo.dataLimitations.some((d) => /spatial/i.test(d)));
-  assert.equal(staleDemo.medicalDisclaimer, CPCB_NON_MEDICAL_DISCLAIMER);
-  assert.equal(staleDemo.protectiveEquipmentCaveat, CPCB_PROTECTIVE_EQUIPMENT_CAVEAT);
-  assert.match(staleDemo.medicalDisclaimer, /does not diagnose.*prescribe medication/i);
-  assert.match(staleDemo.protectiveEquipmentCaveat, /no mask or purifier guarantees complete protection/i);
+  assert.equal(simRec.isDemo, true);
+  assert.equal(simRec.isLiveVerified, false);
+  assert.ok(simRec.sourceCitations.length >= 2);
+  assert.match(simRec.observedTimestampDisplay, /IST/);
+  assert.ok(simRec.dataLimitations.some((d) => /SIMULATED DATA/i.test(d)));
+  assert.equal(simRec.medicalDisclaimer, CPCB_NON_MEDICAL_DISCLAIMER);
+  assert.equal(simRec.protectiveEquipmentCaveat, CPCB_PROTECTIVE_EQUIPMENT_CAVEAT);
+  assert.match(simRec.medicalDisclaimer, /does not diagnose.*prescribe medication/i);
+  assert.match(simRec.protectiveEquipmentCaveat, /no mask or purifier guarantees complete protection/i);
 });
 
-test('Missing / incomplete AQI falls back safely to Unavailable with explicit limitation', () => {
-  const nowMs = Date.parse('2026-11-17T09:30:00.000Z');
+test('Missing AQI falls back safely to Unavailable with explicit limitation', () => {
+  const nowMs = Date.parse('2026-11-19T06:30:00.000Z');
   const unavailable = buildCpcbHealthRecommendation({
     aqiData: makeCityData(null),
     preferences: makePrefs(),

@@ -11,7 +11,6 @@ import {
   RotateCcw,
   Send,
   ShieldAlert,
-  ShieldCheck,
   Sparkles,
   Train,
 } from 'lucide-react';
@@ -41,7 +40,7 @@ const INITIAL_SUGGESTED_QUESTIONS = [
 ];
 
 const FOLLOW_UP_QUESTIONS = [
-  'What are the limitations of current CPCB / OpenAQ readings right now, and how conservative should we be?',
+  'What are the limitations of simulated demonstration readings, and how conservative should we be?',
   'How should we handle evening kitchen exhaust and smoke-free indoor habits tonight?',
   'What if a family member is pollution-sensitive — how should we tighten this schedule?',
   'How much CO2e could switching a 12 km one-way commute from solo car to Metro avoid per 5-day week?',
@@ -179,30 +178,16 @@ export function AiAssistantPage({
               <span>AERIS AI Conversational Advisor</span>
             </h2>
             <p className="text-xs text-slate-400 mt-0.5">
-              Grounded server-side in verified CPCB AQI, official 6-tier health
-              implications, monitoring limitations, and household sensitivity.
-              Never diagnoses, prescribes medication, or promises masks/purifiers
-              guarantee protection.
+              Grounded server-side in AERIS AI Simulation Engine readings (SIMULATED
+              DATA · DEMO MODE), 6-tier CPCB health category guidance, and household
+              sensitivity. Never diagnoses, prescribes medication, or promises
+              masks/purifiers guarantee protection.
             </p>
           </div>
           <div className="flex items-center gap-3 shrink-0">
-            <span
-              className={`inline-flex items-center gap-1.5 text-xs font-medium ${
-                verification?.isLiveVerified
-                  ? 'text-emerald-300'
-                  : 'text-amber-300'
-              }`}
-            >
-              {verification?.isLiveVerified ? (
-                <ShieldCheck className="w-4 h-4 shrink-0" />
-              ) : (
-                <AlertTriangle className="w-4 h-4 shrink-0" />
-              )}
-              <span>
-                {verification?.isLiveVerified
-                  ? 'Live Verified Context'
-                  : 'Verification Notice Active'}
-              </span>
+            <span className="inline-flex items-center gap-1.5 text-xs font-mono font-medium text-amber-300">
+              <AlertTriangle className="w-4 h-4 shrink-0" />
+              <span>SIMULATED DATA · DEMO MODE</span>
             </span>
 
             {messages.length > 0 && (
@@ -249,16 +234,8 @@ export function AiAssistantPage({
           </span>
           <span>
             Source:{' '}
-            <strong className="text-slate-100">
-              {aqiData?.dataMode === 'live'
-                ? 'Live CPCB'
-                : aqiData?.dataMode === 'partial'
-                ? aqiData.hasOfficialData
-                  ? 'Live CPCB (AQI N/A)'
-                  : 'Demo Baseline + OpenAQ'
-                : aqiData
-                ? 'Demo Reference'
-                : 'Unavailable'}
+            <strong className="text-amber-300 font-mono">
+              AERIS AI Simulation Engine (SIMULATED)
             </strong>
           </span>
           <span aria-hidden="true" className="text-slate-600">
@@ -545,7 +522,7 @@ export function AiAssistantPage({
               <div className="flex items-center gap-2 text-xs font-medium text-cyan-300">
                 <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
                 <span>
-                  Consulting Gemini with verified {preferences.city} AQI &
+                  Consulting Gemini with simulated {preferences.city} AQI &amp;
                   household context...
                 </span>
               </div>

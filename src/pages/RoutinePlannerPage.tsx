@@ -241,19 +241,11 @@ export function RoutinePlannerPage({
               </span>
               <span
                 data-testid="routine-verification-state"
-                className={
-                  verification.isLiveVerified
-                    ? 'text-emerald-300 font-medium'
-                    : 'text-amber-300 font-medium'
-                }
+                className="text-amber-300 font-mono font-medium"
               >
-                {verification.isLiveVerified
-                  ? 'Verified Live Data'
-                  : verification.isDemo
-                  ? 'Demo Reference (Not Live)'
-                  : verification.isStale
-                  ? 'Stale Reading (>3h)'
-                  : 'AQI Unavailable'}
+                {verification.isMissing
+                  ? 'AQI Unavailable'
+                  : 'SIMULATED DATA · DEMO MODE'}
               </span>
             </div>
           </div>

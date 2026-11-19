@@ -2,6 +2,11 @@ import {
   buildCpcbHealthRecommendation,
   CPCB_HEALTH_BANDS,
 } from './cpcbHealth.ts';
+import {
+  SIMULATION_BADGE_TEXT,
+  SIMULATION_DATA_SOURCE,
+  SIMULATION_DISCLAIMER_TEXT,
+} from './indiaSimulation.ts';
 import type {
   AiRecommendationStructured,
   ChatHistoryTurn,
@@ -25,7 +30,6 @@ export function evaluateAqiVerificationStatus(
       ? aqiContext.stations.find((s) => s.id === aqiContext.selectedStationId)
       : undefined) ?? aqiContext.stations[0];
 
-  const isDemo = !aqiContext.hasOfficialData || aqiContext.dataMode === 'demo';
   const isMissing =
     aqiContext.primaryAqi === null || aqiContext.category === 'Unavailable';
   const isStale = Boolean(
@@ -33,56 +37,25 @@ export function evaluateAqiVerificationStatus(
       (aqiContext.stations.length > 0 &&
         aqiContext.staleStationsCount >= aqiContext.stations.length)
   );
-  const isLiveVerified =
-    aqiContext.hasOfficialData &&
-    aqiContext.dataMode === 'live' &&
-    !isMissing &&
-    !isStale;
 
-  if (isDemo) {
-    const openAqExtra = aqiContext.hasOpenAqData
-      ? ' Separate live OpenAQ v3 sensor concentrations are available, but they are not official Indian National AQI.'
-      : '';
-    return {
-      isLiveVerified: false,
-      isStale,
-      isMissing,
-      isDemo: true,
-      verificationNotice:
-        'Live official CPCB AQI cannot be verified right now because the official feed is unavailable; baseline figures shown are clearly labeled Demo Reference Data.' +
-        openAqExtra,
-    };
-  }
-
+  // AERIS AI currently runs on the self-generated India simulation engine (SIMULATED DATA · DEMO MODE)
   if (isMissing) {
     return {
       isLiveVerified: false,
       isStale,
       isMissing: true,
-      isDemo: false,
+      isDemo: true,
       verificationNotice:
-        'Live official CPCB AQI cannot be verified because required pollutant readings are incomplete or missing (CPCB AQI is marked Unavailable).',
-    };
-  }
-
-  if (isStale) {
-    return {
-      isLiveVerified: false,
-      isStale: true,
-      isMissing: false,
-      isDemo: false,
-      verificationNotice:
-        'Latest official CPCB reading is stale (>3 hours old), so current real-time conditions cannot be verified.',
+        `${SIMULATION_BADGE_TEXT}: AQI reading is unavailable for this selection. ${SIMULATION_DISCLAIMER_TEXT}`,
     };
   }
 
   return {
-    isLiveVerified: true,
-    isStale: false,
+    isLiveVerified: false,
+    isStale,
     isMissing: false,
-    isDemo: false,
-    verificationNotice:
-      'Verified live official CPCB data within the 3-hour freshness window.',
+    isDemo: true,
+    verificationNotice: `${SIMULATION_BADGE_TEXT} (${SIMULATION_DATA_SOURCE}): ${SIMULATION_DISCLAIMER_TEXT}`,
   };
 }
 
@@ -112,22 +85,13 @@ export function sanitizeChatHistory(
 }
 
 export function buildAllowedSourceReferences(
-  aqiContext: CityAqiResponse
+  _aqiContext: CityAqiResponse
 ): string[] {
-  const refs: string[] = [];
-  if (aqiContext.hasOfficialData) {
-    refs.push('CPCB Real-Time AQI (data.gov.in)');
-  } else {
-    refs.push('AERIS AI Demo Reference Winter Profile (Not Live CPCB)');
-  }
-  if (aqiContext.hasOpenAqData && aqiContext.openAqSensors.length > 0) {
-    refs.push('OpenAQ v3 Sensor Network (Raw Sensor Concentrations)');
-  }
-  refs.push('CPCB National AQI Categories & Health Impacts (0–500 Scale)');
-  refs.push(
-    'AERIS AI Sourced Commute Emission Factors (kg CO2e/passenger-km estimate)'
-  );
-  return refs;
+  return [
+    `${SIMULATION_DATA_SOURCE} (${SIMULATION_BADGE_TEXT} — Not actual environmental measurements)`,
+    'CPCB National AQI Categories & Health Impacts (0–500 Demonstration Scale)',
+    'AERIS AI Sourced Commute Emission Factors (kg CO2e/passenger-km estimate)',
+  ];
 }
 
 function cleanStringArray(value: unknown, fallback: string[]): string[] {
@@ -159,31 +123,37 @@ export function enforceRecommendationGuardrails(
 ): AiRecommendationStructured {
   const verification = evaluateAqiVerificationStatus(aqiContext);
   const allowedSources = buildAllowedSourceReferences(aqiContext);
-  const cpcbHealth = buildCpcbHealthRecommendation({ aqiData: aqiContext, preferences });
-  const band = CPCB_HEALTH_BANDS[aqiContext.category] ?? CPCB_HEALTH_BANDS.Unavailable;
+  const cpcbHealth = buildCpcbHealthRecommendation({
+    aqiData: aqiContext,
+    preferences,
+  });
+  const band =
+    CPCB_HEALTH_BANDS[aqiContext.category] ?? CPCB_HEALTH_BANDS.Unavailable;
 
   const aqiLabel =
     aqiContext.primaryAqi !== null
-      ? `CPCB AQI ${aqiContext.primaryAqi} (${aqiContext.category})`
+      ? `Simulated AQI ${aqiContext.primaryAqi} (${aqiContext.category})`
       : `Unavailable (${aqiContext.category})`;
 
-  const rawRisk = typeof raw.currentRisk === 'string' ? raw.currentRisk.trim() : '';
+  const rawRisk =
+    typeof raw.currentRisk === 'string' ? raw.currentRisk.trim() : '';
   let currentRisk = rawRisk;
-  if (!currentRisk || !currentRisk.toLowerCase().includes(aqiContext.category.toLowerCase())) {
+  if (
+    !currentRisk ||
+    !currentRisk.toLowerCase().includes(aqiContext.category.toLowerCase())
+  ) {
     currentRisk = rawRisk ? `${aqiLabel} — ${rawRisk}` : aqiLabel;
   }
-  if (!verification.isLiveVerified && !currentRisk.toLowerCase().includes('cannot be verified')) {
-    currentRisk = `${currentRisk} — Live official AQI cannot be verified`;
+  if (!currentRisk.toLowerCase().includes('simulated')) {
+    currentRisk = `${currentRisk} — Simulated Data (Demo Mode)`;
   }
 
   const rawLimitations =
     typeof raw.dataLimitations === 'string' ? raw.dataLimitations.trim() : '';
   const disclaimer =
-    'Precautionary guidance only — never diagnoses conditions or prescribes medication; fitted masks and HEPA purifiers reduce exposure but do not guarantee complete protection. Fixed CPCB monitors reflect point-in-time station averages rather than kerbside or indoor air, with no future forecasts implied.';
-  const dataLimitationsParts: string[] = [];
-  if (!verification.isLiveVerified) {
-    dataLimitationsParts.push(verification.verificationNotice);
-  }
+    'Precautionary guidance only — never diagnoses conditions or prescribes medication; fitted masks and HEPA purifiers reduce exposure but do not guarantee complete protection.';
+  const dataLimitationsParts: string[] = [verification.verificationNotice];
+
   if (rawLimitations) {
     const distinctSentences = rawLimitations
       .split(/(?<=[.!?])\s+/)
@@ -192,8 +162,7 @@ export function enforceRecommendationGuardrails(
         if (!s) return false;
         if (verification.verificationNotice.includes(s)) return false;
         if (
-          !verification.isLiveVerified &&
-          /live official cpcb|cannot be verified|demo reference|official feed is unavailable|openaq v3/i.test(
+          /official cpcb live|verified live aqi|actual real-time aqi|government verified/i.test(
             s
           )
         ) {
@@ -205,6 +174,7 @@ export function enforceRecommendationGuardrails(
       dataLimitationsParts.push(distinctSentences.join(' '));
     }
   }
+
   if (
     !dataLimitationsParts.some((p) =>
       /medical|diagnos|prescrib|guarantee/i.test(p)
@@ -222,7 +192,9 @@ export function enforceRecommendationGuardrails(
   ]);
   if (
     band.avoidOutdoorPhysicalActivity &&
-    !avoidActions.some((item) => /outdoor physical activity|outdoor exercise|outdoor exertion/i.test(item))
+    !avoidActions.some((item) =>
+      /outdoor physical activity|outdoor exercise|outdoor exertion/i.test(item)
+    )
   ) {
     avoidActions.unshift(
       `Avoid outdoor physical activity under ${aqiContext.category} (${band.rangeLabel}) air quality.`
@@ -233,10 +205,10 @@ export function enforceRecommendationGuardrails(
     summary:
       typeof raw.summary === 'string' && raw.summary.trim()
         ? raw.summary.trim()
-        : `Guidance for ${aqiContext.city} (${aqiLabel}). ${cpcbHealth.officialHealthImplication}`,
+        : `Simulated demonstration guidance for ${aqiContext.city} (${aqiLabel}). ${cpcbHealth.officialHealthImplication}`,
     currentRisk,
     recommendedActions: cleanStringArray(raw.recommendedActions, [
-      'Check verified station freshness before planning prolonged outdoor exertion.',
+      'Review local environmental alerts before planning prolonged outdoor exertion.',
     ]),
     avoidActions,
     indoorAdvice: cleanStringArray(raw.indoorAdvice, [
@@ -255,7 +227,7 @@ export function enforceRecommendationGuardrails(
         typeof raw.dailySchedule?.afternoon === 'string' &&
         raw.dailySchedule.afternoon.trim()
           ? raw.dailySchedule.afternoon.trim()
-          : 'Re-check mid-afternoon station readings before brief ventilation or essential errands.',
+          : 'Check midday local conditions before brief ventilation or essential errands.',
       evening:
         typeof raw.dailySchedule?.evening === 'string' &&
         raw.dailySchedule.evening.trim()
