@@ -273,8 +273,15 @@ function AerisShell() {
       finalizeIfReady();
     });
 
+    const authReadyFallbackTimer = setTimeout(() => {
+      if (active) {
+        setAuthReady(true);
+      }
+    }, 6_000);
+
     return () => {
       active = false;
+      clearTimeout(authReadyFallbackTimer);
       unsub();
     };
   }, [firebaseConfigured]);

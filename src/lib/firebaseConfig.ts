@@ -310,6 +310,10 @@ export function formatFirebaseAuthError(
       return 'Google sign-in popup was closed before completing sign-in. Click "Sign in with Google" whenever you are ready.';
     case 'auth/cancelled-popup-request':
       return 'A previous Google sign-in request was superseded. Please click "Sign in with Google" again.';
+    case 'auth/timeout':
+      return `Google sign-in timed out on ${hostLabel} (auth/timeout). Check that popups are not blocked, confirm "${hostLabel}" is in Firebase Authorized Domains for ${projectLabel}, and click "Sign in with Google" to try again.`;
+    case 'auth/web-storage-unsupported':
+      return 'Your browser has web storage or cookies disabled for this site (auth/web-storage-unsupported). Enable cookies/storage for this site and try signing in again.';
     case 'auth/network-request-failed':
       return 'Network error while contacting Firebase Authentication. Check your internet connection and retry.';
     case 'auth/invalid-api-key':

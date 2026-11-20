@@ -228,20 +228,64 @@ if (typeof console !== 'undefined') {
   }
 }
 
+const PERSISTENCE_TIMEOUT_MS = 4_000;
+const REDIRECT_RESULT_TIMEOUT_MS = 8_000;
+const POPUP_SIGN_IN_TIMEOUT_MS = 45_000;
+const REDIRECT_INIT_TIMEOUT_MS = 8_000;
+
+function createAuthTimeoutError(operation: string, timeoutMs: number): Error & { code: string } {
+  const err = new Error(
+    `Firebase ${operation} timed out after ${Math.round(timeoutMs / 1000)}s.`
+  ) as Error & { code: string };
+  err.code = 'auth/timeout';
+  return err;
+}
+
+function withAuthTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  operation: string
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(createAuthTimeoutError(operation, timeoutMs));
+    }, timeoutMs);
+
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (err) => {
+        clearTimeout(timer);
+        reject(err);
+      }
+    );
+  });
+}
+
 let persistenceReadyPromise: Promise<void> | null = null;
 function ensureAuthPersistence(): Promise<void> {
   if (!auth) return Promise.resolve();
   if (!persistenceReadyPromise) {
-    persistenceReadyPromise = setPersistence(auth, browserLocalPersistence).catch(
-      (err) => {
-        console.warn(
-          '[AERIS Firebase] setPersistence(browserLocalPersistence) fell back to default:',
-          err instanceof Error ? err.message : String(err)
-        );
-      }
-    );
+    persistenceReadyPromise = withAuthTimeout(
+      setPersistence(auth, browserLocalPersistence),
+      PERSISTENCE_TIMEOUT_MS,
+      'setPersistence'
+    ).catch((err) => {
+      console.warn(
+        '[AERIS Firebase] setPersistence(browserLocalPersistence) fell back to default:',
+        err instanceof Error ? err.message : String(err)
+      );
+    });
   }
   return persistenceReadyPromise;
+}
+
+// Configure persistence eagerly at module startup so clicking "Sign in with Google"
+// invokes signInWithPopup() synchronously inside the user-gesture event turn.
+if (auth && typeof window !== 'undefined') {
+  void ensureAuthPersistence();
 }
 
 function isTopLevelBrowserWindow(): boolean {
@@ -358,7 +402,11 @@ export async function completeGoogleRedirectSignIn(): Promise<{
   }
   try {
     await ensureAuthPersistence();
-    const result = await getRedirectResult(auth);
+    const result = await withAuthTimeout(
+      getRedirectResult(auth),
+      REDIRECT_RESULT_TIMEOUT_MS,
+      'getRedirectResult'
+    );
     if (result?.user) {
       console.info('[AERIS Firebase] getRedirectResult() succeeded:', {
         uidPresent: Boolean(result.user.uid),
@@ -372,6 +420,14 @@ export async function completeGoogleRedirectSignIn(): Promise<{
       error && typeof error === 'object' && 'code' in error
         ? String((error as { code?: unknown }).code ?? '')
         : '';
+    // A startup getRedirectResult timeout simply means no redirect completed;
+    // avoid showing a spurious error banner during normal initial page loads.
+    if (errorCode === 'auth/timeout') {
+      console.warn(
+        '[AERIS Firebase] getRedirectResult() timed out during startup; continuing with onAuthStateChanged.'
+      );
+      return { user: auth.currentUser ?? null, error: null };
+    }
     console.error('[AERIS Firebase] getRedirectResult() failed during startup:', {
       code: errorCode || 'unknown',
       name: error instanceof Error ? error.name : typeof error,
@@ -393,6 +449,70 @@ export async function completeGoogleRedirectSignIn(): Promise<{
       }),
     };
   }
+}
+
+function awaitPopupSignInWithSafeguards(
+  activeAuth: Auth,
+  provider: GoogleAuthProvider
+): Promise<{ user: User; providerId: string }> {
+  // Invoke signInWithPopup synchronously inside the click gesture turn.
+  const popupPromise = signInWithPopup(activeAuth, provider);
+
+  return new Promise<{ user: User; providerId: string }>((resolve, reject) => {
+    let settled = false;
+    const cleanupAndSettle = (fn: () => void) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      unsubAuth();
+      fn();
+    };
+
+    const timer = setTimeout(() => {
+      if (activeAuth.currentUser) {
+        const signedInUser = activeAuth.currentUser;
+        cleanupAndSettle(() =>
+          resolve({ user: signedInUser, providerId: provider.providerId })
+        );
+        return;
+      }
+      cleanupAndSettle(() =>
+        reject(createAuthTimeoutError('signInWithPopup', POPUP_SIGN_IN_TIMEOUT_MS))
+      );
+    }, POPUP_SIGN_IN_TIMEOUT_MS);
+
+    // If the popup finishes auth and syncs session state via onAuthStateChanged
+    // while COOP delays or drops the popup promise resolution, resolve cleanly.
+    const unsubAuth = onAuthStateChanged(activeAuth, (nextUser) => {
+      if (nextUser) {
+        cleanupAndSettle(() =>
+          resolve({ user: nextUser, providerId: provider.providerId })
+        );
+      }
+    });
+
+    popupPromise.then(
+      (cred) => {
+        cleanupAndSettle(() =>
+          resolve({
+            user: cred.user,
+            providerId: cred.providerId ?? provider.providerId,
+          })
+        );
+      },
+      (err) => {
+        // If auth actually succeeded before the popup promise errored, honor the real signed-in user.
+        if (activeAuth.currentUser) {
+          const signedInUser = activeAuth.currentUser;
+          cleanupAndSettle(() =>
+            resolve({ user: signedInUser, providerId: provider.providerId })
+          );
+          return;
+        }
+        cleanupAndSettle(() => reject(err));
+      }
+    );
+  });
 }
 
 export async function signInWithGoogle(): Promise<{
@@ -424,15 +544,19 @@ export async function signInWithGoogle(): Promise<{
       `Firebase Authentication is not configured in this deployment.${missingHint}`
     );
   }
-  await ensureAuthPersistence();
+
+  // Trigger persistence setup without awaiting before signInWithPopup() so the browser
+  // preserves transient user-gesture activation for the Google sign-in popup.
+  void ensureAuthPersistence();
+
   try {
-    const cred = await signInWithPopup(auth, googleProvider);
+    const result = await awaitPopupSignInWithSafeguards(auth, googleProvider);
     console.info('[AERIS Firebase] signInWithPopup() succeeded:', {
-      uidPresent: Boolean(cred.user?.uid),
-      emailVerified: Boolean(cred.user?.emailVerified),
-      providerId: cred.providerId ?? googleProvider.providerId,
+      uidPresent: Boolean(result.user?.uid),
+      emailVerified: Boolean(result.user?.emailVerified),
+      providerId: result.providerId,
     });
-    return { user: cred.user, redirected: false };
+    return { user: result.user, redirected: false };
   } catch (error) {
     const errorCode =
       error && typeof error === 'object' && 'code' in error
@@ -446,7 +570,8 @@ export async function signInWithGoogle(): Promise<{
       errorCode === 'auth/unauthorized-domain' ||
       errorCode === 'auth/popup-closed-by-user' ||
       errorCode === 'auth/cancelled-popup-request' ||
-      errorCode === 'auth/popup-blocked';
+      errorCode === 'auth/popup-blocked' ||
+      errorCode === 'auth/timeout';
 
     const logDetails = {
       code: errorCode || 'unknown',
@@ -481,7 +606,11 @@ export async function signInWithGoogle(): Promise<{
         { expectedRedirectUri: getExpectedOAuthRedirectUri(), currentHost }
       );
       try {
-        await signInWithRedirect(auth, googleProvider);
+        await withAuthTimeout(
+          signInWithRedirect(auth, googleProvider),
+          REDIRECT_INIT_TIMEOUT_MS,
+          'signInWithRedirect'
+        );
         return { user: null, redirected: true };
       } catch (redirectError) {
         const redirectCode =

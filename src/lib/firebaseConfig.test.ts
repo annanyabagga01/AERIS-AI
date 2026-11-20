@@ -112,6 +112,19 @@ test('formats auth/configuration-not-found, auth/operation-not-allowed, auth/una
   );
   assert.match(internalErr, /auth\/internal-error/i);
   assert.match(internalErr, /VITE_FIREBASE_AUTH_DOMAIN/i);
+
+  const timeoutErr = formatFirebaseAuthError(
+    { code: 'auth/timeout' },
+    { projectId: 'aeris-ai-967a7', currentHost: 'aeris-ai-alpha.vercel.app' }
+  );
+  assert.match(timeoutErr, /timed out/i);
+  assert.match(timeoutErr, /aeris-ai-alpha\.vercel\.app/i);
+
+  const storageErr = formatFirebaseAuthError(
+    { code: 'auth/web-storage-unsupported' },
+    { projectId: 'aeris-ai-967a7' }
+  );
+  assert.match(storageErr, /web-storage-unsupported/i);
 });
 
 test('formatFirestoreUiError never leaks authInfo email from structured Firestore errors', () => {

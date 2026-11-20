@@ -128,8 +128,15 @@ export function CommunityHubPage({
   useEffect(() => {
     if (authRedirectError) {
       setErrorMessage(authRedirectError);
+      setAuthAction('idle');
     }
   }, [authRedirectError]);
+
+  useEffect(() => {
+    if (user && authAction === 'signing_in') {
+      setAuthAction('idle');
+    }
+  }, [user, authAction]);
 
   // Auth subscription fallback when rendered without lifted App auth state
   useEffect(() => {
@@ -290,12 +297,14 @@ export function CommunityHubPage({
     setErrorMessage(null);
     setStatusMessage(null);
     if (!firebaseReady) {
-      const missingHint =
-        firebaseStatus.missingEnvVars.length > 0
-          ? ` Missing environment variables: ${firebaseStatus.missingEnvVars.join(', ')}.`
-          : '';
+      const primaryWarning = firebaseStatus.warnings[0];
+      const missingHint = primaryWarning
+        ? ` ${primaryWarning}`
+        : firebaseStatus.missingEnvVars.length > 0
+        ? ` Missing environment variables: ${firebaseStatus.missingEnvVars.join(', ')}.`
+        : '';
       setErrorMessage(
-        `Firebase Authentication is not configured in this deployment.${missingHint} Configure VITE_FIREBASE_* variables in Vercel and redeploy.`
+        `Firebase Authentication is not configured in this deployment.${missingHint}`
       );
       return;
     }
