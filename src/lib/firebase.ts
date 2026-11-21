@@ -21,6 +21,7 @@ import {
   collection,
   deleteDoc,
   doc,
+  getDoc,
   getDocFromServer,
   getFirestore,
   limit,
@@ -28,14 +29,15 @@ import {
   query,
   serverTimestamp,
   setDoc,
+  updateDoc,
   where,
   type Firestore,
   type Unsubscribe,
 } from 'firebase/firestore';
 import {
+  buildContributionFirestorePayload,
+  buildParticipantFirestorePayload,
   containsSensitivePiiOrLocation,
-  resolveContributionCo2,
-  sanitizeAnonymousHandle,
   sanitizeCityName,
 } from './community.ts';
 import {
@@ -803,6 +805,7 @@ export async function submitOptInContribution(input: {
   city: string;
   actionType: ActionType;
   co2AvoidedKg: number;
+  optInPublic: boolean;
   note?: string;
   challengeId?: string;
 }): Promise<void> {
@@ -810,6 +813,16 @@ export async function submitOptInContribution(input: {
   if (!db || !user) {
     throw new Error(
       'Please sign in with Google before submitting to the live community feed.'
+    );
+  }
+  if (!user.emailVerified) {
+    throw new Error(
+      'Your Google account email must be verified before publishing to the live Firestore community hub.'
+    );
+  }
+  if (input.optInPublic !== true) {
+    throw new Error(
+      'Please enable "Opt-in to live community" before submitting to the live Firestore community feed.'
     );
   }
 
@@ -837,35 +850,21 @@ export async function submitOptInContribution(input: {
     );
   }
 
-  const { co2AvoidedKg } = resolveContributionCo2(
-    input.actionType,
-    input.co2AvoidedKg
-  );
-
   const docId = sanitizeId(`c_${Date.now()}_${user.uid.slice(0, 8)}`);
   const docPath = `community_contributions/${docId}`;
 
-  const payload: Record<string, unknown> = {
+  const payload = buildContributionFirestorePayload({
     authorUid: user.uid,
-    anonymousHandle: sanitizeAnonymousHandle(input.anonymousHandle),
-    city: sanitizeCityName(input.city),
+    emailVerified: Boolean(user.emailVerified),
+    optInPublic: input.optInPublic,
+    anonymousHandle: input.anonymousHandle,
+    city: input.city,
     actionType: input.actionType,
-    co2AvoidedKg,
-    optInPublic: true,
+    co2AvoidedKg: input.co2AvoidedKg,
+    note: input.note,
+    challengeId: input.challengeId,
     createdAt: serverTimestamp(),
-  };
-
-  const trimmedNote = input.note?.trim().slice(0, 240);
-  if (trimmedNote) {
-    payload.note = trimmedNote;
-  }
-  const trimmedChallenge = input.challengeId
-    ?.trim()
-    .replace(/[^a-zA-Z0-9_\-]+/g, '')
-    .slice(0, 64);
-  if (trimmedChallenge) {
-    payload.challengeId = trimmedChallenge;
-  }
+  });
 
   try {
     await setDoc(doc(db, 'community_contributions', docId), payload);
@@ -883,8 +882,13 @@ export async function deleteOptInContribution(
   }
   const cleanId = sanitizeId(contributionId);
   const docPath = `community_contributions/${cleanId}`;
+  const docRef = doc(db, 'community_contributions', cleanId);
   try {
-    await deleteDoc(doc(db, 'community_contributions', cleanId));
+    const existingSnap = await getDoc(docRef);
+    if (!existingSnap.exists()) {
+      return;
+    }
+    await deleteDoc(docRef);
   } catch (err) {
     handleFirestoreError(err, OperationType.DELETE, docPath);
   }
@@ -892,24 +896,32 @@ export async function deleteOptInContribution(
 
 export async function joinCommunityChallenge(
   challengeId: string,
-  city: string
+  city: string,
+  optInPublic: boolean = true
 ): Promise<void> {
   const user = auth?.currentUser;
   if (!db || !user) {
     throw new Error('Please sign in with Google to join community challenges.');
   }
-  const cleanChallenge = challengeId.replace(/[^a-zA-Z0-9_\-]+/g, '').slice(0, 64);
-  const participantId = sanitizeId(`${cleanChallenge}_${user.uid}`);
+  const { participantId, payload } = buildParticipantFirestorePayload({
+    challengeId,
+    userId: user.uid,
+    emailVerified: Boolean(user.emailVerified),
+    optInPublic,
+    city,
+    joinedAt: serverTimestamp(),
+  });
   const docPath = `challenge_participants/${participantId}`;
+  const participantRef = doc(db, 'challenge_participants', participantId);
 
   try {
-    await setDoc(doc(db, 'challenge_participants', participantId), {
-      challengeId: cleanChallenge,
-      userId: user.uid,
-      city: sanitizeCityName(city),
-      optInPublic: true,
-      joinedAt: serverTimestamp(),
-    });
+    // Rules enforce `allow update: if false;` on challenge_participants, so skip
+    // creating if this deterministic enrollment document already exists.
+    const existingSnap = await getDoc(participantRef);
+    if (existingSnap.exists()) {
+      return;
+    }
+    await setDoc(participantRef, payload);
   } catch (err) {
     handleFirestoreError(err, OperationType.CREATE, docPath);
   }
@@ -925,9 +937,14 @@ export async function leaveCommunityChallenge(
   const cleanChallenge = challengeId.replace(/[^a-zA-Z0-9_\-]+/g, '').slice(0, 64);
   const participantId = sanitizeId(`${cleanChallenge}_${user.uid}`);
   const docPath = `challenge_participants/${participantId}`;
+  const participantRef = doc(db, 'challenge_participants', participantId);
 
   try {
-    await deleteDoc(doc(db, 'challenge_participants', participantId));
+    const existingSnap = await getDoc(participantRef);
+    if (!existingSnap.exists()) {
+      return;
+    }
+    await deleteDoc(participantRef);
   } catch (err) {
     handleFirestoreError(err, OperationType.DELETE, docPath);
   }
@@ -937,23 +954,46 @@ export async function seedChallengesToFirestore(
   challenges: CommunityChallenge[]
 ): Promise<void> {
   const user = auth?.currentUser;
-  if (!db || !user) {
-    throw new Error('Admin sign-in required to seed Firestore challenges.');
+  if (!db || !user || !user.emailVerified) {
+    throw new Error('Verified admin sign-in required to seed Firestore challenges.');
   }
   for (const ch of challenges) {
     const cleanId = ch.id.replace(/[^a-zA-Z0-9_\-]+/g, '').slice(0, 64);
+    if (!cleanId) continue;
     const docPath = `community_challenges/${cleanId}`;
+    const challengeRef = doc(db, 'community_challenges', cleanId);
+    const title = ch.title.trim().slice(0, 100);
+    const description = ch.description.trim().slice(0, 360);
+    const cityScope = ch.cityScope.trim().slice(0, 60);
+    const targetActions = Math.max(1, Math.min(1000000, Math.round(ch.targetActions)));
+
+    if (title.length < 3 || description.length < 10 || cityScope.length < 2) {
+      continue;
+    }
+
     try {
-      await setDoc(doc(db, 'community_challenges', cleanId), {
-        title: ch.title.slice(0, 100),
-        description: ch.description.slice(0, 360),
-        cityScope: ch.cityScope.slice(0, 60),
-        targetActions: Math.max(1, Math.min(1000000, ch.targetActions)),
-        isActive: true,
-        createdAt: serverTimestamp(),
-      });
+      const existingSnap = await getDoc(challengeRef);
+      if (existingSnap.exists()) {
+        // Match `allow update` rule: preserve immutable `createdAt` and update only allowed keys.
+        await updateDoc(challengeRef, {
+          title,
+          description,
+          cityScope,
+          targetActions,
+          isActive: true,
+        });
+      } else {
+        await setDoc(challengeRef, {
+          title,
+          description,
+          cityScope,
+          targetActions,
+          isActive: true,
+          createdAt: serverTimestamp(),
+        });
+      }
     } catch (err) {
-      handleFirestoreError(err, OperationType.CREATE, docPath);
+      handleFirestoreError(err, OperationType.WRITE, docPath);
     }
   }
 }

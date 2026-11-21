@@ -180,9 +180,13 @@ export function CommunityHubPage({
 
     const unsubChallenges = subscribeLiveChallenges(
       (items) => setLiveChallenges(items),
-      () => {
-        // Gracefully retain demo challenge templates if collection is not yet seeded
-      }
+      (err) =>
+        setErrorMessage(
+          formatFirestoreUiError(err, {
+            projectId: firebaseStatus.projectId,
+            databaseId: firebaseStatus.databaseId,
+          })
+        )
     );
 
     const unsubEnroll = subscribeChallengeParticipants(
@@ -201,7 +205,7 @@ export function CommunityHubPage({
       unsubChallenges();
       unsubEnroll();
     };
-  }, [isLiveOptIn, firebaseStatus.projectId, firebaseStatus.databaseId]);
+  }, [isLiveOptIn, user?.uid, firebaseStatus.projectId, firebaseStatus.databaseId]);
 
   // Strict data separation: never mix Demo rows into Live mode
   const activeChallenges = useMemo(() => {
@@ -395,12 +399,23 @@ export function CommunityHubPage({
       return;
     }
 
+    if (user && !user.emailVerified) {
+      setErrorMessage(
+        'Your Google account email must be verified before joining live community challenges.'
+      );
+      return;
+    }
+
     try {
       if (currentlyJoined) {
         await leaveCommunityChallenge(id);
         setStatusMessage('Left community challenge.');
       } else {
-        await joinCommunityChallenge(id, preferences.city);
+        await joinCommunityChallenge(
+          id,
+          preferences.city,
+          Boolean(preferences.communityOptIn)
+        );
         setStatusMessage('Enrolled anonymously in community challenge.');
       }
     } catch (err) {
@@ -464,6 +479,7 @@ export function CommunityHubPage({
         city: preferences.city,
         actionType,
         co2AvoidedKg,
+        optInPublic: Boolean(preferences.communityOptIn),
         note,
         challengeId,
       });
