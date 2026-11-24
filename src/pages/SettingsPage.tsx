@@ -1087,10 +1087,10 @@ export function SettingsPage({
             <div className="py-3 flex items-center justify-between">
               <div>
                 <p className="font-medium text-slate-200">
-                  Firebase Auth &amp; Firestore
+                  Firebase Project Config
                 </p>
                 <p className="text-slate-400">
-                  Opt-in anonymous community hub storage
+                  Project config retained · Community Hub runs in Demo Mode
                 </p>
               </div>
               <span

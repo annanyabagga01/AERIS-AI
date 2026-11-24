@@ -14,17 +14,10 @@ import {
   X,
 } from 'lucide-react';
 import { AnimatePresence, motion } from 'motion/react';
-import type { User } from 'firebase/auth';
 import { ChatbotErrorBoundary } from './components/ChatbotErrorBoundary.tsx';
 import { ErrorBoundary } from './components/ErrorBoundary.tsx';
 import { buildApiUrl } from './lib/apiClient.ts';
 import { classifyCpcbAqi } from './lib/aqi.ts';
-import {
-  auth,
-  completeGoogleRedirectSignIn,
-  isFirebaseConfigured,
-  subscribeAuth,
-} from './lib/firebase.ts';
 import {
   loadImpactLog,
   loadPreferences,
@@ -129,7 +122,7 @@ const NAV_ITEMS: {
     label: 'Community Hub',
     shortLabel: 'Hub',
     icon: Users,
-    subtitle: 'Opt-in anonymous actions & challenges',
+    subtitle: 'Interactive demo sustainability actions & challenges (Demo Mode)',
     group: 'Sustainability & Setup',
   },
   {
@@ -207,84 +200,6 @@ function AerisShell() {
   const [impactEntries, setImpactEntries] = useState<ImpactLogEntry[]>(() =>
     loadImpactLog()
   );
-
-  const firebaseConfigured = isFirebaseConfigured();
-  const [authUser, setAuthUser] = useState<User | null>(
-    () => auth?.currentUser ?? null
-  );
-  const [authReady, setAuthReady] = useState<boolean>(!firebaseConfigured);
-  const [authRedirectError, setAuthRedirectError] = useState<string | null>(
-    null
-  );
-
-  const handleAuthUserChange = useCallback((nextUser: User | null) => {
-    setAuthUser(nextUser);
-    setAuthReady(true);
-    if (nextUser) {
-      setAuthRedirectError(null);
-    }
-  }, []);
-
-  useEffect(() => {
-    if (!firebaseConfigured) {
-      setAuthReady(true);
-      return () => {};
-    }
-    let active = true;
-    let authEventReceived = false;
-    let redirectSettled = false;
-    let resolvedUser: User | null = auth?.currentUser ?? null;
-
-    const finalizeIfReady = () => {
-      if (!active) return;
-      if (resolvedUser || (authEventReceived && redirectSettled)) {
-        setAuthReady(true);
-      }
-    };
-
-    void completeGoogleRedirectSignIn().then((res) => {
-      if (!active) return;
-      redirectSettled = true;
-      if (res.user) {
-        resolvedUser = res.user;
-        setAuthUser(res.user);
-        setAuthRedirectError(null);
-      }
-      if (res.error) {
-        setAuthRedirectError(res.error);
-      }
-      finalizeIfReady();
-    });
-
-    const unsub = subscribeAuth((nextUser) => {
-      if (!active) return;
-      authEventReceived = true;
-      const effectiveUser = nextUser ?? auth?.currentUser ?? null;
-      // Avoid overwriting a freshly resolved redirect user with an early cached null snapshot
-      if (!effectiveUser && resolvedUser && !redirectSettled) {
-        finalizeIfReady();
-        return;
-      }
-      resolvedUser = effectiveUser;
-      setAuthUser(effectiveUser);
-      if (effectiveUser) {
-        setAuthRedirectError(null);
-      }
-      finalizeIfReady();
-    });
-
-    const authReadyFallbackTimer = setTimeout(() => {
-      if (active) {
-        setAuthReady(true);
-      }
-    }, 6_000);
-
-    return () => {
-      active = false;
-      clearTimeout(authReadyFallbackTimer);
-      unsub();
-    };
-  }, [firebaseConfigured]);
 
   const [selectedStation, setSelectedStation] = useState<string>('all');
   const [aqiData, setAqiData] = useState<CityAqiResponse | null>(null);
@@ -724,10 +639,6 @@ function AerisShell() {
                 <CommunityHubPage
                   preferences={preferences}
                   onUpdatePreferences={handleUpdatePreferences}
-                  authUser={authUser}
-                  authReady={authReady}
-                  authRedirectError={authRedirectError}
-                  onAuthUserChange={handleAuthUserChange}
                 />
               )}
               {activeNav === 'settings' && (
