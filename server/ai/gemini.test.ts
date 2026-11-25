@@ -36,36 +36,36 @@ test('loadGeminiApiKey trims whitespace, strips wrapping quotes, and rejects pla
   assert.equal(isGeminiConfigured({ GEMINI_API_KEY: 'YOUR_GEMINI_API_KEY' }), false);
 });
 
-test('buildGeminiModelAttempts prioritizes gemini-4-hydrogen, falls back to gemini-3.1-flash-lite, and skips deprecated overrides', () => {
+test('buildGeminiModelAttempts prioritizes fast gemini-3.1-flash-lite, falls back to gemini-4-hydrogen, and skips deprecated overrides', () => {
   const defaults = buildGeminiModelAttempts();
   assert.deepEqual(
     defaults.map((a) => a.model),
-    ['gemini-4-hydrogen', 'gemini-3.1-flash-lite']
+    ['gemini-3.1-flash-lite', 'gemini-4-hydrogen']
   );
-  assert.equal(defaults[0].thinkingLevel, 'LOW');
-  assert.equal(defaults[1].thinkingLevel, 'MINIMAL');
+  assert.equal(defaults[0].thinkingLevel, 'MINIMAL');
+  assert.equal(defaults[1].thinkingLevel, 'LOW');
   assert.equal(
     defaults.some((a) => a.model.includes('gemini-2.5-flash')),
     false
   );
 
-  const withLiteOverride = buildGeminiModelAttempts(' "gemini-3.1-flash-lite" ');
+  const withHydrogenOverride = buildGeminiModelAttempts(' "gemini-4-hydrogen" ');
   assert.deepEqual(
-    withLiteOverride.map((a) => a.model),
-    ['gemini-3.1-flash-lite', 'gemini-4-hydrogen']
+    withHydrogenOverride.map((a) => a.model),
+    ['gemini-4-hydrogen', 'gemini-3.1-flash-lite']
   );
-  assert.equal(withLiteOverride[0].thinkingLevel, 'MINIMAL');
+  assert.equal(withHydrogenOverride[0].thinkingLevel, 'LOW');
 
   // Deprecated GEMINI_MODEL values should be ignored cleanly
   const withRetiredOverride = buildGeminiModelAttempts('gemini-2.5-flash');
   assert.deepEqual(
     withRetiredOverride.map((a) => a.model),
-    ['gemini-4-hydrogen', 'gemini-3.1-flash-lite']
+    ['gemini-3.1-flash-lite', 'gemini-4-hydrogen']
   );
   const withLegacyOverride = buildGeminiModelAttempts('gemini-2.0-flash');
   assert.deepEqual(
     withLegacyOverride.map((a) => a.model),
-    ['gemini-4-hydrogen', 'gemini-3.1-flash-lite']
+    ['gemini-3.1-flash-lite', 'gemini-4-hydrogen']
   );
 });
 
@@ -245,7 +245,7 @@ test('handleServerlessAiChat returns accurate HTTP error codes for invalid metho
     assert.equal(getResult().statusCode, 404);
   }
 
-  // 5. 503 when GEMINI_API_KEY is unset (restoring original key cleanly afterward)
+  // 5. 503 when GEMINI_API_KEY is unset (including minimal chat payload without preferences)
   const hadKey = Object.prototype.hasOwnProperty.call(process.env, 'GEMINI_API_KEY');
   const savedKey = process.env.GEMINI_API_KEY;
   try {
@@ -254,7 +254,6 @@ test('handleServerlessAiChat returns accurate HTTP error codes for invalid metho
       method: 'POST',
       body: {
         city: 'Delhi',
-        preferences: { commuteMode: 'metro', pollutionSensitiveHousehold: true },
         message: 'Is outdoor exercise safe?',
       },
     });
@@ -267,6 +266,38 @@ test('handleServerlessAiChat returns accurate HTTP error codes for invalid metho
       process.env.GEMINI_API_KEY = savedKey;
     } else {
       delete process.env.GEMINI_API_KEY;
+    }
+  }
+});
+
+test('buildApiUrl defaults to relative /api paths and blocks localhost or AI Studio preview bases in production', async () => {
+  const { buildApiUrl } = await import('../../src/lib/apiClient.ts');
+  const originalWindow = (globalThis as { window?: unknown }).window;
+  try {
+    (globalThis as { window?: unknown }).window = {
+      location: { hostname: 'aeris-ai-01.vercel.app' },
+    };
+    assert.equal(buildApiUrl('/api/ai/recommendations', ''), '/api/ai/recommendations');
+    assert.equal(
+      buildApiUrl('/api/ai/recommendations', 'http://localhost:3000'),
+      '/api/ai/recommendations'
+    );
+    assert.equal(
+      buildApiUrl(
+        '/api/ai/recommendations',
+        'https://ais-pre-abc123.asia-east1.run.app'
+      ),
+      '/api/ai/recommendations'
+    );
+    assert.equal(
+      buildApiUrl('/api/ai/recommendations', 'https://api.example.com/'),
+      'https://api.example.com/api/ai/recommendations'
+    );
+  } finally {
+    if (originalWindow === undefined) {
+      delete (globalThis as { window?: unknown }).window;
+    } else {
+      (globalThis as { window?: unknown }).window = originalWindow;
     }
   }
 });

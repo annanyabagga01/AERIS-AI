@@ -19,9 +19,9 @@ import type {
 } from '../../src/lib/types.ts';
 import { redactSecrets } from '../security.ts';
 
-const OVERALL_DEADLINE_MS = 28_000;
-const PRIMARY_ATTEMPT_TIMEOUT_MS = 16_000;
-const FALLBACK_ATTEMPT_TIMEOUT_MS = 14_000;
+const OVERALL_DEADLINE_MS = 27_000;
+const PRIMARY_ATTEMPT_TIMEOUT_MS = 10_000;
+const FALLBACK_ATTEMPT_TIMEOUT_MS = 16_000;
 const MIN_RETRY_BUDGET_MS = 3_500;
 
 const PLACEHOLDER_KEYS = new Set([
@@ -111,8 +111,8 @@ function isDeprecatedGeminiModel(model: string): boolean {
 
 /**
  * Returns the ordered, deduplicated Gemini model fallback chain using only
- * active, supported models (`gemini-4-hydrogen` primary with LOW thinking,
- * `gemini-3.1-flash-lite` fallback with MINIMAL thinking).
+ * active, supported models (`gemini-3.1-flash-lite` low-latency primary with
+ * MINIMAL thinking, `gemini-4-hydrogen` fallback with LOW thinking).
  */
 export function buildGeminiModelAttempts(
   configuredModelRaw?: string
@@ -125,22 +125,22 @@ export function buildGeminiModelAttempts(
       console.warn(
         `Ignoring deprecated GEMINI_MODEL="${configuredModel}"; using active default models instead.`
       );
-    } else if (configuredModel === 'gemini-4-hydrogen') {
-      customAttempt.push({
-        model: 'gemini-4-hydrogen',
-        thinkingLevel: ThinkingLevel.LOW,
-        maxTimeoutMs: PRIMARY_ATTEMPT_TIMEOUT_MS,
-      });
     } else if (configuredModel === 'gemini-3.1-flash-lite') {
       customAttempt.push({
         model: 'gemini-3.1-flash-lite',
         thinkingLevel: ThinkingLevel.MINIMAL,
+        maxTimeoutMs: PRIMARY_ATTEMPT_TIMEOUT_MS,
+      });
+    } else if (configuredModel === 'gemini-4-hydrogen') {
+      customAttempt.push({
+        model: 'gemini-4-hydrogen',
+        thinkingLevel: ThinkingLevel.LOW,
         maxTimeoutMs: FALLBACK_ATTEMPT_TIMEOUT_MS,
       });
     } else {
       customAttempt.push({
         model: configuredModel,
-        maxTimeoutMs: FALLBACK_ATTEMPT_TIMEOUT_MS,
+        maxTimeoutMs: 12_000,
       });
     }
   }
@@ -148,13 +148,13 @@ export function buildGeminiModelAttempts(
   return [
     ...customAttempt,
     {
-      model: 'gemini-4-hydrogen',
-      thinkingLevel: ThinkingLevel.LOW,
+      model: 'gemini-3.1-flash-lite',
+      thinkingLevel: ThinkingLevel.MINIMAL,
       maxTimeoutMs: PRIMARY_ATTEMPT_TIMEOUT_MS,
     },
     {
-      model: 'gemini-3.1-flash-lite',
-      thinkingLevel: ThinkingLevel.MINIMAL,
+      model: 'gemini-4-hydrogen',
+      thinkingLevel: ThinkingLevel.LOW,
       maxTimeoutMs: FALLBACK_ATTEMPT_TIMEOUT_MS,
     },
   ].filter(
@@ -415,6 +415,10 @@ export async function generateAerisRecommendations(params: {
       httpOptions: {
         headers: {
           'User-Agent': 'aistudio-build',
+        },
+        // Fail fast per attempt so our cross-model fallback loop runs well inside Vercel's serverless budget.
+        retryOptions: {
+          attempts: 1,
         },
       },
     });

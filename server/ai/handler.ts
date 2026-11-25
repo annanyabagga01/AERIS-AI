@@ -167,19 +167,25 @@ export function classifyAiErrorStatus(message: string): number {
 export async function processAiChatRequest(
   body: AiChatRequestBody
 ): Promise<{ statusCode: number; payload: Record<string, unknown> }> {
+  const hasQuestionOrMessage =
+    (typeof body?.question === 'string' && body.question.trim().length > 0) ||
+    (typeof body?.message === 'string' && body.message.trim().length > 0);
+  const hasPreferencesObject =
+    Boolean(body?.preferences) &&
+    typeof body.preferences === 'object' &&
+    !Array.isArray(body.preferences);
+
   if (
     !body ||
     typeof body.city !== 'string' ||
     !body.city.trim() ||
-    !body.preferences ||
-    typeof body.preferences !== 'object' ||
-    Array.isArray(body.preferences)
+    (!hasPreferencesObject && !hasQuestionOrMessage)
   ) {
     return {
       statusCode: 400,
       payload: {
         success: false,
-        error: 'Invalid request: city and preferences are required.',
+        error: 'Invalid request: city and preferences (or a chat message) are required.',
       },
     };
   }
@@ -214,7 +220,7 @@ export async function processAiChatRequest(
 
   const normalizedPreferences = normalizePreferences(
     simulatedContext.city,
-    body.preferences
+    hasPreferencesObject ? (body.preferences as Partial<FamilyPreferences>) : {}
   );
   const history = sanitizeChatHistory(body.history, 8);
   const verification = evaluateAqiVerificationStatus(simulatedContext);

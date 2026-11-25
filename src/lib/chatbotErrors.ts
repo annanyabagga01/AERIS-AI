@@ -84,11 +84,17 @@ export function classifyChatbotError(params: {
     };
   }
 
-  // 3. Missing route (HTTP 404)
+  // 3. Missing route or unsupported city (HTTP 404)
   if (status === 404) {
+    const isCityNotFound =
+      Boolean(rawServerMsg) &&
+      rawServerMsg.toLowerCase().includes('city') &&
+      rawServerMsg.toLowerCase().includes('catalog');
     return {
       category: 'not_found',
-      title: 'AI Endpoint Unavailable (HTTP 404)',
+      title: isCityNotFound
+        ? 'Unsupported City Selection (HTTP 404)'
+        : 'AI Endpoint Unavailable (HTTP 404)',
       message:
         rawServerMsg ||
         'The chatbot API endpoint (/api/ai/recommendations) was not found. Redeploy the latest serverless functions.',
