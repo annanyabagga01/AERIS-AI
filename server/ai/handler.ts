@@ -29,6 +29,7 @@ const VALID_COMMUTE_MODES = new Set([
   'metro',
   'bus',
   'carpool',
+  'ev_cab',
   'walk_cycle',
   'wfh',
 ]);
@@ -124,8 +125,23 @@ export async function readJsonBody<T>(
   return JSON.parse(raw) as T;
 }
 
-function classifyAiErrorStatus(message: string): number {
+export function classifyAiErrorStatus(message: string): number {
   const lower = message.toLowerCase();
+  if (
+    message.includes('API_KEY_INVALID') ||
+    lower.includes('rejected the server api key') ||
+    lower.includes('api key not valid') ||
+    message.includes('401')
+  ) {
+    return 401;
+  }
+  if (
+    message.includes('PERMISSION_DENIED') ||
+    lower.includes('denied permission') ||
+    message.includes('403')
+  ) {
+    return 403;
+  }
   if (
     lower.includes('not configured') ||
     lower.includes('failed to initialize') ||
@@ -236,6 +252,7 @@ export async function processAiChatRequest(
           isLiveVerified: verification.isLiveVerified,
           verificationNotice: verification.verificationNotice,
         },
+        reply: structured.summary,
         recommendation: structured,
       },
     };

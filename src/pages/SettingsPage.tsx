@@ -55,7 +55,7 @@ interface HealthStatus {
   status: string;
   integrations: {
     geminiConfigured: boolean;
-    firebaseConfigured: boolean;
+    communityDemoMode?: boolean;
     simulationEngineActive: boolean;
   };
   simulationEngine?: {
@@ -1087,22 +1087,14 @@ export function SettingsPage({
             <div className="py-3 flex items-center justify-between">
               <div>
                 <p className="font-medium text-slate-200">
-                  Firebase Project Config
+                  Community Sustainability Hub
                 </p>
                 <p className="text-slate-400">
-                  Project config retained · Community Hub runs in Demo Mode
+                  Local interactive demo data · no sign-in or API keys required
                 </p>
               </div>
-              <span
-                className={
-                  health?.integrations.firebaseConfigured
-                    ? 'text-emerald-300 font-medium'
-                    : 'text-slate-400'
-                }
-              >
-                {health?.integrations.firebaseConfigured
-                  ? 'Configured'
-                  : 'Demo Only'}
+              <span className="text-amber-300 font-mono font-medium shrink-0">
+                DEMO MODE
               </span>
             </div>
           </div>

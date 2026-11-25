@@ -2,14 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   buildCommunityAggregates,
-  buildContributionFirestorePayload,
-  buildParticipantFirestorePayload,
   containsSensitivePiiOrLocation,
   resolveContributionCo2,
   sanitizeCityName,
-  VALID_ANONYMOUS_HANDLE_REGEX,
-  VALID_CITY_NAME_REGEX,
-  VALID_FIRESTORE_ID_REGEX,
 } from './community.ts';
 import type {
   ChallengeParticipantRecord,
@@ -156,121 +151,4 @@ test('buildCommunityAggregates produces clean zeroed state when community data i
   assert.ok(agg.achievements.every((a) => !a.unlocked));
 });
 
-test('buildContributionFirestorePayload enforces all firestore.rules schema, optInPublic, verification, and serverTimestamp requirements', () => {
-  const SERVER_TS_SENTINEL = { _methodName: 'serverTimestamp' };
-  const payload = buildContributionFirestorePayload({
-    authorUid: '8GFDiOuZW8fpz18R0kULCtyuAh63',
-    emailVerified: true,
-    optInPublic: true,
-    anonymousHandle: 'Delhi-Metro_01',
-    city: 'New Delhi 110001',
-    actionType: 'metro_commute',
-    co2AvoidedKg: 3.1,
-    note: 'Took Yellow Line instead of driving',
-    challengeId: 'ncr-metro-week',
-    createdAt: SERVER_TS_SENTINEL,
-  });
-
-  // Only allowed keys from isValidContribution in firestore.rules
-  const allowedKeys = new Set([
-    'authorUid',
-    'anonymousHandle',
-    'city',
-    'actionType',
-    'co2AvoidedKg',
-    'note',
-    'challengeId',
-    'optInPublic',
-    'createdAt',
-  ]);
-  for (const key of Object.keys(payload)) {
-    assert.ok(allowedKeys.has(key), `Unexpected key: ${key}`);
-  }
-  assert.equal(payload.authorUid, '8GFDiOuZW8fpz18R0kULCtyuAh63');
-  assert.equal(payload.optInPublic, true);
-  assert.equal(payload.createdAt, SERVER_TS_SENTINEL);
-  assert.match(String(payload.anonymousHandle), VALID_ANONYMOUS_HANDLE_REGEX);
-  assert.match(String(payload.city), VALID_CITY_NAME_REGEX);
-  assert.equal(payload.co2AvoidedKg, 3.1);
-
-  // Qualitative habit must always send co2AvoidedKg === 0 (matching isValidCo2ForAction)
-  const qualPayload = buildContributionFirestorePayload({
-    authorUid: 'uid_abc123',
-    emailVerified: true,
-    optInPublic: true,
-    anonymousHandle: 'CleanAirFan',
-    city: 'Bengaluru',
-    actionType: 'no_burning',
-    co2AvoidedKg: 5,
-    createdAt: SERVER_TS_SENTINEL,
-  });
-  assert.equal(qualPayload.co2AvoidedKg, 0);
-  assert.equal('note' in qualPayload, false);
-  assert.equal('challengeId' in qualPayload, false);
-
-  // Reject unverified email or non-opt-in submissions before hitting Firestore
-  assert.throws(
-    () =>
-      buildContributionFirestorePayload({
-        authorUid: 'uid_abc123',
-        emailVerified: false,
-        optInPublic: true,
-        anonymousHandle: 'CleanAirFan',
-        city: 'Delhi',
-        actionType: 'metro_commute',
-        createdAt: SERVER_TS_SENTINEL,
-      }),
-    /verified/i
-  );
-  assert.throws(
-    () =>
-      buildContributionFirestorePayload({
-        authorUid: 'uid_abc123',
-        emailVerified: true,
-        optInPublic: false,
-        anonymousHandle: 'CleanAirFan',
-        city: 'Delhi',
-        actionType: 'metro_commute',
-        createdAt: SERVER_TS_SENTINEL,
-      }),
-    /Opt-in/i
-  );
-});
-
-test('buildParticipantFirestorePayload enforces challenge_participants firestore.rules schema and deterministic valid ID', () => {
-  const SERVER_TS_SENTINEL = { _methodName: 'serverTimestamp' };
-  const { participantId, payload } = buildParticipantFirestorePayload({
-    challengeId: 'ncr-metro-week',
-    userId: '8GFDiOuZW8fpz18R0kULCtyuAh63',
-    emailVerified: true,
-    optInPublic: true,
-    city: 'Gurugram',
-    joinedAt: SERVER_TS_SENTINEL,
-  });
-
-  assert.match(participantId, VALID_FIRESTORE_ID_REGEX);
-  assert.deepEqual(Object.keys(payload).sort(), [
-    'challengeId',
-    'city',
-    'joinedAt',
-    'optInPublic',
-    'userId',
-  ]);
-  assert.equal(payload.optInPublic, true);
-  assert.equal(payload.userId, '8GFDiOuZW8fpz18R0kULCtyuAh63');
-  assert.equal(payload.joinedAt, SERVER_TS_SENTINEL);
-
-  assert.throws(
-    () =>
-      buildParticipantFirestorePayload({
-        challengeId: 'x',
-        userId: 'uid_abc123',
-        emailVerified: true,
-        optInPublic: true,
-        city: 'Delhi',
-        joinedAt: SERVER_TS_SENTINEL,
-      }),
-    /Invalid community challenge/i
-  );
-});
 

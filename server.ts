@@ -1,10 +1,8 @@
 import 'dotenv/config';
 import express from 'express';
-import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { classifyCpcbAqi, INDIAN_CITIES } from './src/lib/aqi.ts';
-import { cleanFirebaseConfigValue } from './src/lib/firebaseConfig.ts';
 import {
   calculateCommuteImpact,
   EMISSION_FACTORS_KG_PER_KM,
@@ -88,14 +86,6 @@ async function startServer() {
   // 1. Health & configuration check (non-secret status only, never expose keys)
   app.get('/api/health', (_req, res) => {
     const snapshot = getIndiaSimulatedSnapshot(Date.now(), SIMULATION_INTERVAL_MS);
-    const firebaseConfigExists =
-      fs.existsSync(path.join(__dirname, 'firebase-applet-config.json')) ||
-      Boolean(
-        cleanFirebaseConfigValue(process.env.VITE_FIREBASE_API_KEY) &&
-          cleanFirebaseConfigValue(process.env.VITE_FIREBASE_AUTH_DOMAIN) &&
-          cleanFirebaseConfigValue(process.env.VITE_FIREBASE_PROJECT_ID) &&
-          cleanFirebaseConfigValue(process.env.VITE_FIREBASE_APP_ID)
-      );
     res.json({
       success: true,
       status: 'ok',
@@ -112,7 +102,7 @@ async function startServer() {
       ],
       integrations: {
         geminiConfigured: isGeminiConfigured(),
-        firebaseConfigured: firebaseConfigExists,
+        communityDemoMode: true,
         simulationEngineActive: true,
       },
       simulationEngine: {
@@ -316,13 +306,13 @@ async function startServer() {
     res.json(result);
   });
 
-  // 6. Demo Community dataset (used when signed-out / Firebase opt-in inactive)
+  // 6. Demo Community dataset (login-free simulated community data)
   app.get('/api/community/demo', (_req, res) => {
     res.json({
       success: true,
       isDemo: true,
       disclaimer:
-        'Demo Community Reference Data. Sign in with Google and opt in to submit and view live anonymous Firestore community actions.',
+        'This is an interactive demonstration. Community statistics and participation records are simulated and are not live community submissions.',
       challenges: DEMO_CHALLENGES,
       contributions: DEMO_CONTRIBUTIONS,
     });

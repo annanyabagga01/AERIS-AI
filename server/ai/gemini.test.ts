@@ -9,7 +9,10 @@ import {
   loadGeminiApiKey,
   parseGeminiJsonResponse,
 } from './gemini.ts';
-import { handleServerlessAiChat } from './handler.ts';
+import {
+  classifyAiErrorStatus,
+  handleServerlessAiChat,
+} from './handler.ts';
 
 test('loadGeminiApiKey trims whitespace, strips wrapping quotes, and rejects placeholders', () => {
   assert.equal(loadGeminiApiKey({}), null);
@@ -33,23 +36,63 @@ test('loadGeminiApiKey trims whitespace, strips wrapping quotes, and rejects pla
   assert.equal(isGeminiConfigured({ GEMINI_API_KEY: 'YOUR_GEMINI_API_KEY' }), false);
 });
 
-test('buildGeminiModelAttempts uses active supported models and excludes retired gemini-2.5-flash', () => {
+test('buildGeminiModelAttempts prioritizes gemini-4-hydrogen, falls back to gemini-3.1-flash-lite, and skips deprecated overrides', () => {
   const defaults = buildGeminiModelAttempts();
   assert.deepEqual(
     defaults.map((a) => a.model),
-    ['gemini-3.1-flash-lite', 'gemini-4-hydrogen']
+    ['gemini-4-hydrogen', 'gemini-3.1-flash-lite']
   );
-  assert.equal(defaults[0].thinkingLevel, 'MINIMAL');
-  assert.equal(defaults[1].thinkingLevel, 'LOW');
+  assert.equal(defaults[0].thinkingLevel, 'LOW');
+  assert.equal(defaults[1].thinkingLevel, 'MINIMAL');
   assert.equal(
     defaults.some((a) => a.model.includes('gemini-2.5-flash')),
     false
   );
 
-  const withCustom = buildGeminiModelAttempts(' "gemini-4-hydrogen" ');
+  const withLiteOverride = buildGeminiModelAttempts(' "gemini-3.1-flash-lite" ');
   assert.deepEqual(
-    withCustom.map((a) => a.model),
+    withLiteOverride.map((a) => a.model),
+    ['gemini-3.1-flash-lite', 'gemini-4-hydrogen']
+  );
+  assert.equal(withLiteOverride[0].thinkingLevel, 'MINIMAL');
+
+  // Deprecated GEMINI_MODEL values should be ignored cleanly
+  const withRetiredOverride = buildGeminiModelAttempts('gemini-2.5-flash');
+  assert.deepEqual(
+    withRetiredOverride.map((a) => a.model),
     ['gemini-4-hydrogen', 'gemini-3.1-flash-lite']
+  );
+  const withLegacyOverride = buildGeminiModelAttempts('gemini-2.0-flash');
+  assert.deepEqual(
+    withLegacyOverride.map((a) => a.model),
+    ['gemini-4-hydrogen', 'gemini-3.1-flash-lite']
+  );
+});
+
+test('classifyAiErrorStatus maps auth, permission, quota, network, and timeout errors to accurate HTTP codes', () => {
+  assert.equal(
+    classifyAiErrorStatus('Gemini API rejected the server API key (API_KEY_INVALID).'),
+    401
+  );
+  assert.equal(
+    classifyAiErrorStatus('Gemini API denied permission (403 PERMISSION_DENIED).'),
+    403
+  );
+  assert.equal(
+    classifyAiErrorStatus('Gemini API quota temporarily reached (429).'),
+    429
+  );
+  assert.equal(
+    classifyAiErrorStatus('Network error reaching the Gemini API from the server.'),
+    502
+  );
+  assert.equal(
+    classifyAiErrorStatus('GEMINI_API_KEY is not configured on the server.'),
+    503
+  );
+  assert.equal(
+    classifyAiErrorStatus('Gemini API timed out while generating a response.'),
+    503
   );
 });
 

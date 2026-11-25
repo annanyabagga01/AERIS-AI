@@ -20,7 +20,8 @@ import type {
 import { redactSecrets } from '../security.ts';
 
 const OVERALL_DEADLINE_MS = 28_000;
-const DEFAULT_ATTEMPT_TIMEOUT_MS = 18_000;
+const PRIMARY_ATTEMPT_TIMEOUT_MS = 16_000;
+const FALLBACK_ATTEMPT_TIMEOUT_MS = 14_000;
 const MIN_RETRY_BUDGET_MS = 3_500;
 
 const PLACEHOLDER_KEYS = new Set([
@@ -82,27 +83,79 @@ export interface GeminiModelAttempt {
   maxTimeoutMs: number;
 }
 
+const DEPRECATED_GEMINI_MODELS = new Set([
+  'gemini-1.0-pro',
+  'gemini-pro',
+  'gemini-1.5-flash',
+  'gemini-1.5-flash-8b',
+  'gemini-1.5-pro',
+  'gemini-2.0-flash',
+  'gemini-2.0-flash-lite',
+  'gemini-2.0-flash-thinking',
+  'gemini-2.0-pro',
+  'gemini-2.5-flash',
+  'gemini-2.5-flash-lite',
+  'gemini-2.5-pro',
+]);
+
+function isDeprecatedGeminiModel(model: string): boolean {
+  const normalized = model.toLowerCase();
+  if (DEPRECATED_GEMINI_MODELS.has(normalized)) return true;
+  return (
+    normalized.startsWith('gemini-1.0-') ||
+    normalized.startsWith('gemini-1.5-') ||
+    normalized.startsWith('gemini-2.0-') ||
+    normalized.startsWith('gemini-2.5-flash')
+  );
+}
+
 /**
  * Returns the ordered, deduplicated Gemini model fallback chain using only
- * active, supported models (`gemini-3.1-flash-lite` fast primary, `gemini-4-hydrogen` fallback).
+ * active, supported models (`gemini-4-hydrogen` primary with LOW thinking,
+ * `gemini-3.1-flash-lite` fallback with MINIMAL thinking).
  */
 export function buildGeminiModelAttempts(
   configuredModelRaw?: string
 ): GeminiModelAttempt[] {
   const configuredModel = cleanEnvValue(configuredModelRaw);
+  const customAttempt: GeminiModelAttempt[] = [];
+
+  if (configuredModel) {
+    if (isDeprecatedGeminiModel(configuredModel)) {
+      console.warn(
+        `Ignoring deprecated GEMINI_MODEL="${configuredModel}"; using active default models instead.`
+      );
+    } else if (configuredModel === 'gemini-4-hydrogen') {
+      customAttempt.push({
+        model: 'gemini-4-hydrogen',
+        thinkingLevel: ThinkingLevel.LOW,
+        maxTimeoutMs: PRIMARY_ATTEMPT_TIMEOUT_MS,
+      });
+    } else if (configuredModel === 'gemini-3.1-flash-lite') {
+      customAttempt.push({
+        model: 'gemini-3.1-flash-lite',
+        thinkingLevel: ThinkingLevel.MINIMAL,
+        maxTimeoutMs: FALLBACK_ATTEMPT_TIMEOUT_MS,
+      });
+    } else {
+      customAttempt.push({
+        model: configuredModel,
+        maxTimeoutMs: FALLBACK_ATTEMPT_TIMEOUT_MS,
+      });
+    }
+  }
+
   return [
-    ...(configuredModel
-      ? [{ model: configuredModel, maxTimeoutMs: 12_000 }]
-      : []),
-    {
-      model: 'gemini-3.1-flash-lite',
-      thinkingLevel: ThinkingLevel.MINIMAL,
-      maxTimeoutMs: 15_000,
-    },
+    ...customAttempt,
     {
       model: 'gemini-4-hydrogen',
       thinkingLevel: ThinkingLevel.LOW,
-      maxTimeoutMs: DEFAULT_ATTEMPT_TIMEOUT_MS,
+      maxTimeoutMs: PRIMARY_ATTEMPT_TIMEOUT_MS,
+    },
+    {
+      model: 'gemini-3.1-flash-lite',
+      thinkingLevel: ThinkingLevel.MINIMAL,
+      maxTimeoutMs: FALLBACK_ATTEMPT_TIMEOUT_MS,
     },
   ].filter(
     (entry, idx, list) =>
@@ -246,7 +299,9 @@ function isModelOrConfigUnsupportedError(msg: string): boolean {
     lower.includes('not supported') ||
     lower.includes('thinking_level') ||
     lower.includes('thinkinglevel') ||
-    lower.includes('thinkingconfig')
+    lower.includes('thinkingconfig') ||
+    (msg.includes('INVALID_ARGUMENT') &&
+      (lower.includes('thinking') || lower.includes('model')))
   );
 }
 
@@ -567,7 +622,20 @@ export async function generateAerisRecommendations(params: {
     throw new Error(finalMsg);
   }
 
-  const rawText = response.text ?? '';
+  let rawText = response.text ?? '';
+  if (!rawText.trim()) {
+    const candidateParts = response.candidates?.[0]?.content?.parts;
+    if (Array.isArray(candidateParts)) {
+      rawText = candidateParts
+        .filter(
+          (part): part is { text: string; thought?: boolean } =>
+            typeof part?.text === 'string' && !part?.thought
+        )
+        .map((part) => part.text)
+        .join('')
+        .trim();
+    }
+  }
   if (!rawText.trim()) {
     const finishReason = response.candidates?.[0]?.finishReason;
     if (finishReason && finishReason !== 'STOP') {

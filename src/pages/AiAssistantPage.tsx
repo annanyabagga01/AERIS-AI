@@ -49,6 +49,108 @@ const FOLLOW_UP_QUESTIONS = [
   'How much CO2e could switching a 12 km one-way commute from solo car to Metro avoid per 5-day week?',
 ];
 
+const CHAT_SESSION_STORAGE_KEY = 'aeris_ai_chat_session_v1';
+const CLIENT_REQUEST_TIMEOUT_MS = 45_000;
+
+function loadSessionMessages(): ChatMessage[] {
+  if (typeof window === 'undefined') return [];
+  try {
+    const raw = window.sessionStorage.getItem(CHAT_SESSION_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .filter(
+        (item): item is ChatMessage =>
+          Boolean(item) &&
+          typeof item === 'object' &&
+          typeof (item as ChatMessage).id === 'string' &&
+          ((item as ChatMessage).role === 'user' ||
+            (item as ChatMessage).role === 'assistant') &&
+          typeof (item as ChatMessage).text === 'string' &&
+          typeof (item as ChatMessage).timestampIso === 'string' &&
+          !(item as ChatMessage).error
+      )
+      .slice(-16);
+  } catch {
+    return [];
+  }
+}
+
+function saveSessionMessages(messages: ChatMessage[]): void {
+  if (typeof window === 'undefined') return;
+  try {
+    const persistable = messages.filter((m) => !m.error).slice(-16);
+    if (persistable.length === 0) {
+      window.sessionStorage.removeItem(CHAT_SESSION_STORAGE_KEY);
+    } else {
+      window.sessionStorage.setItem(
+        CHAT_SESSION_STORAGE_KEY,
+        JSON.stringify(persistable)
+      );
+    }
+  } catch {
+    // Ignore storage quota or private-mode restrictions
+  }
+}
+
+function toStringList(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((entry): entry is string => typeof entry === 'string')
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+}
+
+function normalizeStructuredRecommendation(
+  raw: Partial<AiRecommendationStructured> | null | undefined
+): AiRecommendationStructured | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const summary =
+    typeof raw.summary === 'string' ? raw.summary.trim() : '';
+  if (!summary) return null;
+
+  const schedule =
+    raw.dailySchedule && typeof raw.dailySchedule === 'object'
+      ? raw.dailySchedule
+      : ({} as Partial<AiRecommendationStructured['dailySchedule']>);
+
+  return {
+    summary,
+    currentRisk:
+      typeof raw.currentRisk === 'string' && raw.currentRisk.trim()
+        ? raw.currentRisk.trim()
+        : 'Simulated Air Quality Assessment (Demo Mode)',
+    recommendedActions: toStringList(raw.recommendedActions),
+    avoidActions: toStringList(raw.avoidActions),
+    indoorAdvice: toStringList(raw.indoorAdvice),
+    commuteAdvice: toStringList(raw.commuteAdvice),
+    dailySchedule: {
+      morning:
+        typeof schedule.morning === 'string' && schedule.morning.trim()
+          ? schedule.morning.trim()
+          : 'Check simulated local AQI before planning morning outdoor routines.',
+      afternoon:
+        typeof schedule.afternoon === 'string' && schedule.afternoon.trim()
+          ? schedule.afternoon.trim()
+          : 'Review simulated midday air quality before ventilating or commuting.',
+      evening:
+        typeof schedule.evening === 'string' && schedule.evening.trim()
+          ? schedule.evening.trim()
+          : 'Keep indoor air smoke-free and limit outdoor exertion if simulated AQI is elevated.',
+    },
+    reasoning:
+      typeof raw.reasoning === 'string' && raw.reasoning.trim()
+        ? raw.reasoning.trim()
+        : 'Grounded in simulated city air quality context and household preferences.',
+    sourceReferences: toStringList(raw.sourceReferences),
+    dataLimitations:
+      typeof raw.dataLimitations === 'string' && raw.dataLimitations.trim()
+        ? raw.dataLimitations.trim()
+        : 'AERIS AI Simulation Engine (SIMULATED DATA · DEMO MODE). Precautionary guidance only; not medical advice.',
+  };
+}
+
 export function AiAssistantPage({
   aqiData,
   stationId,
@@ -56,10 +158,36 @@ export function AiAssistantPage({
 }: AiAssistantPageProps) {
   const [prompt, setPrompt] = useState('');
   const [loading, setLoading] = useState(false);
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [messages, setMessages] = useState<ChatMessage[]>(() =>
+    loadSessionMessages()
+  );
+  const messagesRef = useRef<ChatMessage[]>(messages);
   const threadEndRef = useRef<HTMLDivElement | null>(null);
   const inFlightRef = useRef(false);
+  const abortControllerRef = useRef<AbortController | null>(null);
+  const mountedRef = useRef(true);
+  const msgSeqRef = useRef(0);
   const { reportError, clearError } = useChatbotError();
+
+  const nextMessageId = (prefix: 'u' | 'a' | 'e') => {
+    msgSeqRef.current += 1;
+    return `${prefix}-${Date.now()}-${msgSeqRef.current}`;
+  };
+
+  useEffect(() => {
+    messagesRef.current = messages;
+    saveSessionMessages(messages);
+  }, [messages]);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      abortControllerRef.current?.abort();
+      abortControllerRef.current = null;
+      inFlightRef.current = false;
+    };
+  }, []);
 
   const verification = aqiData ? evaluateAqiVerificationStatus(aqiData) : null;
   const activeStation =
@@ -76,12 +204,13 @@ export function AiAssistantPage({
     options?: { retryErrorId?: string }
   ) => {
     const trimmed = questionText.trim();
-    if (!trimmed || loading || inFlightRef.current) return;
+    if (!trimmed || inFlightRef.current) return;
     inFlightRef.current = true;
 
+    const currentMessages = messagesRef.current;
     const baseMessages = options?.retryErrorId
-      ? messages.filter((m) => m.id !== options.retryErrorId)
-      : messages;
+      ? currentMessages.filter((m) => m.id !== options.retryErrorId)
+      : currentMessages;
 
     const historyPayload = sanitizeChatHistory(
       baseMessages
@@ -97,10 +226,10 @@ export function AiAssistantPage({
     );
 
     if (options?.retryErrorId) {
-      setMessages(baseMessages);
+      setMessages((prev) => prev.filter((m) => m.id !== options.retryErrorId));
     } else {
       const userMsg: ChatMessage = {
-        id: `u-${Date.now()}`,
+        id: nextMessageId('u'),
         role: 'user',
         text: trimmed,
         timestampIso: new Date().toISOString(),
@@ -116,7 +245,15 @@ export function AiAssistantPage({
 
     let responseStatus: number | undefined;
     let serverErrorMessage: string | null = null;
-    const errorMsgId = `e-${Date.now()}`;
+    const errorMsgId = nextMessageId('e');
+
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+    let timedOut = false;
+    const timeoutId = window.setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, CLIENT_REQUEST_TIMEOUT_MS);
 
     try {
       if (typeof navigator !== 'undefined' && navigator.onLine === false) {
@@ -126,7 +263,7 @@ export function AiAssistantPage({
       const res = await fetch(buildApiUrl('/api/ai/recommendations'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        signal: AbortSignal.timeout(45000),
+        signal: controller.signal,
         body: JSON.stringify({
           city: preferences.city,
           station: stationId && stationId !== 'all' ? stationId : undefined,
@@ -140,21 +277,39 @@ export function AiAssistantPage({
       const rawBody = await res.text();
       let json: {
         error?: string;
-        recommendation?: AiRecommendationStructured;
+        reply?: string;
+        text?: string;
+        recommendation?: Partial<AiRecommendationStructured>;
       } | null = null;
       if (rawBody.trim()) {
         try {
           json = JSON.parse(rawBody) as {
             error?: string;
-            recommendation?: AiRecommendationStructured;
+            reply?: string;
+            text?: string;
+            recommendation?: Partial<AiRecommendationStructured>;
           };
         } catch {
           json = null;
         }
       }
 
-      if (!res.ok || !json?.recommendation) {
-        serverErrorMessage = json?.error ?? null;
+      const normalizedRecommendation = normalizeStructuredRecommendation(
+        json?.recommendation
+      );
+      const plainReply =
+        typeof json?.reply === 'string' && json.reply.trim()
+          ? json.reply.trim()
+          : typeof json?.text === 'string' && json.text.trim()
+          ? json.text.trim()
+          : null;
+
+      if (!res.ok || (!normalizedRecommendation && !plainReply)) {
+        serverErrorMessage =
+          json?.error ??
+          (!res.ok
+            ? null
+            : 'The AI backend returned an empty response. Please click Retry.');
         const descriptor = classifyChatbotError({
           httpStatus: res.status,
           serverMessage: serverErrorMessage,
@@ -162,11 +317,13 @@ export function AiAssistantPage({
         throw new Error(descriptor.message);
       }
 
+      if (!mountedRef.current) return;
+
       const assistantMsg: ChatMessage = {
-        id: `a-${Date.now()}`,
+        id: nextMessageId('a'),
         role: 'assistant',
-        text: json.recommendation.summary,
-        structured: json.recommendation,
+        text: normalizedRecommendation?.summary ?? plainReply ?? '',
+        structured: normalizedRecommendation ?? undefined,
         timestampIso: new Date().toISOString(),
       };
       setMessages((prev) => {
@@ -174,8 +331,17 @@ export function AiAssistantPage({
         return next.length > 16 ? next.slice(next.length - 16) : next;
       });
     } catch (err) {
+      if (!mountedRef.current) return;
+      const effectiveError = timedOut
+        ? Object.assign(
+            new Error(
+              'The AI assistant timed out waiting for Gemini. Click Retry to send your message again.'
+            ),
+            { name: 'TimeoutError' }
+          )
+        : err;
       const descriptor = classifyChatbotError({
-        error: err,
+        error: effectiveError,
         httpStatus: responseStatus,
         serverMessage: serverErrorMessage,
         isOffline:
@@ -193,13 +359,19 @@ export function AiAssistantPage({
       };
       setMessages((prev) => [...prev, errMsg]);
     } finally {
+      window.clearTimeout(timeoutId);
+      if (abortControllerRef.current === controller) {
+        abortControllerRef.current = null;
+      }
       inFlightRef.current = false;
-      setLoading(false);
+      if (mountedRef.current) {
+        setLoading(false);
+      }
     }
   };
 
   const hasAssistantReply = messages.some(
-    (m) => m.role === 'assistant' && Boolean(m.structured)
+    (m) => m.role === 'assistant' && !m.error && (Boolean(m.structured) || Boolean(m.text))
   );
 
   return (
@@ -231,6 +403,7 @@ export function AiAssistantPage({
                 onClick={() => {
                   clearError();
                   setMessages([]);
+                  saveSessionMessages([]);
                 }}
                 disabled={loading}
                 className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-slate-700 text-xs text-slate-300 hover:bg-slate-800/80 transition-colors"

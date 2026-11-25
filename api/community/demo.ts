@@ -21,7 +21,7 @@ export default function handler(
     success: true,
     isDemo: true,
     disclaimer:
-      'Demo Community Reference Data. Sign in with Google and opt in to submit and view live anonymous Firestore community actions.',
+      'This is an interactive demonstration. Community statistics and participation records are simulated and are not live community submissions.',
     challenges: DEMO_CHALLENGES,
     contributions: DEMO_CONTRIBUTIONS,
   });
