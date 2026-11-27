@@ -429,7 +429,7 @@ export function EarthScene({
     canvas.style.height = '100%';
     canvas.style.display = 'block';
     canvas.style.touchAction = 'none';
-    container.innerHTML = '';
+    container.replaceChildren();
     container.appendChild(canvas);
 
     const scene = new THREE.Scene();

@@ -1,9 +1,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { readJsonBody, sendJson } from '../../server/ai/handler.ts';
-import {
-  calculateCommuteImpact,
-  EMISSION_FACTORS_KG_PER_KM,
-} from '../../src/lib/emissions.ts';
+import { readJsonBody } from '../../server/ai/handler.ts';
+import { sendJson, validateEmissionsPayload } from '../../server/http.ts';
+import { calculateCommuteImpact } from '../../src/lib/emissions.ts';
 import type { EmissionsInput } from '../../src/lib/types.ts';
 
 export default async function handler(
@@ -36,21 +34,8 @@ export default async function handler(
     return;
   }
 
-  if (
-    !body ||
-    (body.baselineMode !== 'solo_car' && body.baselineMode !== 'two_wheeler') ||
-    typeof body.alternativeMode !== 'string' ||
-    !Object.prototype.hasOwnProperty.call(
-      EMISSION_FACTORS_KG_PER_KM,
-      body.alternativeMode
-    ) ||
-    typeof body.oneWayDistanceKm !== 'number' ||
-    typeof body.tripsPerWeek !== 'number' ||
-    !Number.isFinite(body.oneWayDistanceKm) ||
-    !Number.isFinite(body.tripsPerWeek) ||
-    body.oneWayDistanceKm <= 0 ||
-    body.tripsPerWeek <= 0
-  ) {
+  const validated = validateEmissionsPayload(body);
+  if (!validated) {
     sendJson(res, 400, {
       success: false,
       error: 'Invalid emissions calculation payload.',
@@ -58,14 +43,5 @@ export default async function handler(
     return;
   }
 
-  const result = calculateCommuteImpact({
-    baselineMode: body.baselineMode,
-    alternativeMode: body.alternativeMode,
-    oneWayDistanceKm: body.oneWayDistanceKm,
-    tripsPerWeek: body.tripsPerWeek,
-    aqi: typeof body.aqi === 'number' ? body.aqi : null,
-    pollutionSensitiveHousehold: Boolean(body.pollutionSensitiveHousehold),
-  });
-
-  sendJson(res, 200, result);
+  sendJson(res, 200, calculateCommuteImpact(validated));
 }

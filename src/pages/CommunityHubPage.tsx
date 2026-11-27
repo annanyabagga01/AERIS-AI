@@ -682,8 +682,8 @@ export function CommunityHubPage({
             <p className="text-[11px] text-slate-400 flex items-center gap-1.5">
               <ShieldCheck className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
               <span>
-                Local Demo Mode only — no account required and no data is
-                written to Firestore.
+                Local Demo Mode only — no account required and demo actions stay
+                strictly in your browser.
               </span>
             </p>
           </form>

@@ -1,20 +1,22 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import { sendJson } from '../../server/http.ts';
 import {
   detectApproximateIndianCity,
   extractClientIp,
 } from '../../server/location.ts';
 
-function sendJson(res: ServerResponse, statusCode: number, body: unknown): void {
-  res.statusCode = statusCode;
-  res.setHeader('Content-Type', 'application/json; charset=utf-8');
-  res.setHeader('Cache-Control', 'no-store');
-  res.end(JSON.stringify(body));
-}
-
 export default async function handler(
   req: IncomingMessage,
   res: ServerResponse
 ): Promise<void> {
+  if (req.method && req.method !== 'GET' && req.method !== 'HEAD') {
+    sendJson(res, 405, {
+      success: false,
+      error: `Method ${req.method} not allowed. Use GET /api/location/approximate.`,
+    });
+    return;
+  }
+
   try {
     const clientIp = extractClientIp({
       headers: req.headers,

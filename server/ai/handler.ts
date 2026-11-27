@@ -9,8 +9,11 @@ import {
   resolveSimulationIntervalMs,
 } from '../../src/lib/indiaSimulation.ts';
 import type { FamilyPreferences } from '../../src/lib/types.ts';
+import { sendJson } from '../http.ts';
 import { redactSecrets } from '../security.ts';
 import { generateAerisRecommendations } from './gemini.ts';
+
+export { sendJson };
 
 const MAX_BODY_BYTES = 256 * 1024;
 
@@ -82,17 +85,6 @@ function normalizePreferences(
   };
 }
 
-export function sendJson(
-  res: ServerResponse,
-  statusCode: number,
-  body: unknown
-): void {
-  if (res.writableEnded) return;
-  res.statusCode = statusCode;
-  res.setHeader('Content-Type', 'application/json; charset=utf-8');
-  res.setHeader('Cache-Control', 'no-store');
-  res.end(JSON.stringify(body));
-}
 
 export async function readJsonBody<T>(
   req: IncomingMessage & { body?: unknown }

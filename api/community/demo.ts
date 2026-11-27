@@ -3,7 +3,7 @@ import {
   DEMO_CHALLENGES,
   DEMO_CONTRIBUTIONS,
 } from '../../server/adapters/demoData.ts';
-import { sendJson } from '../../server/ai/handler.ts';
+import { sendJson } from '../../server/http.ts';
 
 export default function handler(
   req: IncomingMessage,

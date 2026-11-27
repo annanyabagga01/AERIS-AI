@@ -1,3 +1,4 @@
+import { isIP } from 'node:net';
 import type { Request } from 'express';
 import { findNearestSupportedCity, INDIAN_CITIES } from '../src/lib/aqi.ts';
 import { INDIA_STATES_AND_UTS } from '../src/lib/indiaSimulation.ts';
@@ -62,9 +63,15 @@ export function isPrivateOrLoopbackIp(ip: string): boolean {
   return false;
 }
 
+function isValidPublicIp(ip: string): boolean {
+  const clean = ip.trim().replace(/^::ffff:/i, '');
+  return isIP(clean) !== 0 && !isPrivateOrLoopbackIp(clean);
+}
+
 /**
  * Extracts the originating client IP transiently from proxy headers for
- * one-time approximate city lookup. Never logged or stored.
+ * one-time approximate city lookup. Rejects malformed or non-IP values
+ * and never logs or stores the address.
  */
 export function extractClientIp(req: Pick<Request, 'headers' | 'socket'>): string | null {
   const forwarded = req.headers['x-forwarded-for'];
@@ -73,16 +80,16 @@ export function extractClientIp(req: Pick<Request, 'headers' | 'socket'>): strin
       .split(',')
       .map((part) => part.trim().replace(/^::ffff:/i, ''))
       .filter(Boolean);
-    const firstPublic = candidates.find((ip) => !isPrivateOrLoopbackIp(ip));
+    const firstPublic = candidates.find((ip) => isValidPublicIp(ip));
     if (firstPublic) return firstPublic;
   }
   const realIp = req.headers['x-real-ip'];
   if (typeof realIp === 'string' && realIp.trim()) {
     const clean = realIp.trim().replace(/^::ffff:/i, '');
-    if (!isPrivateOrLoopbackIp(clean)) return clean;
+    if (isValidPublicIp(clean)) return clean;
   }
   const remote = req.socket?.remoteAddress?.replace(/^::ffff:/i, '') ?? '';
-  if (remote && !isPrivateOrLoopbackIp(remote)) {
+  if (remote && isValidPublicIp(remote)) {
     return remote;
   }
   return null;
@@ -286,7 +293,7 @@ async function fetchJsonWithTimeout<T>(
 export async function detectApproximateIndianCity(
   clientIp: string | null
 ): Promise<ApproximateLocationResult> {
-  if (clientIp && isPrivateOrLoopbackIp(clientIp)) {
+  if (clientIp && (isIP(clientIp.trim().replace(/^::ffff:/i, '')) === 0 || isPrivateOrLoopbackIp(clientIp))) {
     return {
       detected: false,
       city: null,
@@ -303,7 +310,8 @@ export async function detectApproximateIndianCity(
     };
   }
 
-  const encodedIp = clientIp ? encodeURIComponent(clientIp) : '';
+  const sanitizedIp = clientIp ? clientIp.trim().replace(/^::ffff:/i, '') : '';
+  const encodedIp = sanitizedIp ? encodeURIComponent(sanitizedIp) : '';
 
   // Primary provider: ipwho.is (HTTPS, no key required, returns country_code, city, region, lat/lon)
   const ipWhoUrl = encodedIp

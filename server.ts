@@ -3,10 +3,7 @@ import express from 'express';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { classifyCpcbAqi, INDIAN_CITIES } from './src/lib/aqi.ts';
-import {
-  calculateCommuteImpact,
-  EMISSION_FACTORS_KG_PER_KM,
-} from './src/lib/emissions.ts';
+import { calculateCommuteImpact } from './src/lib/emissions.ts';
 import {
   buildSimulatedCityAqiResponse,
   getIndiaSimulatedSnapshot,
@@ -30,6 +27,7 @@ import {
   processAiChatRequest,
   type AiChatRequestBody,
 } from './server/ai/handler.ts';
+import { validateEmissionsPayload } from './server/http.ts';
 import {
   detectApproximateIndianCity,
   extractClientIp,
@@ -272,38 +270,18 @@ async function startServer() {
 
   // 5. Server-side emissions calculator
   app.post('/api/impact/calculate', (req, res) => {
-    const body = req.body as Partial<EmissionsInput>;
-    if (
-      !body ||
-      (body.baselineMode !== 'solo_car' && body.baselineMode !== 'two_wheeler') ||
-      typeof body.alternativeMode !== 'string' ||
-      !Object.prototype.hasOwnProperty.call(
-        EMISSION_FACTORS_KG_PER_KM,
-        body.alternativeMode
-      ) ||
-      typeof body.oneWayDistanceKm !== 'number' ||
-      typeof body.tripsPerWeek !== 'number' ||
-      !Number.isFinite(body.oneWayDistanceKm) ||
-      !Number.isFinite(body.tripsPerWeek) ||
-      body.oneWayDistanceKm <= 0 ||
-      body.tripsPerWeek <= 0
-    ) {
+    const validated = validateEmissionsPayload(
+      req.body as Partial<EmissionsInput>
+    );
+    if (!validated) {
       res.status(400).json({
+        success: false,
         error: 'Invalid emissions calculation payload.',
       });
       return;
     }
 
-    const result = calculateCommuteImpact({
-      baselineMode: body.baselineMode,
-      alternativeMode: body.alternativeMode,
-      oneWayDistanceKm: body.oneWayDistanceKm,
-      tripsPerWeek: body.tripsPerWeek,
-      aqi: typeof body.aqi === 'number' ? body.aqi : null,
-      pollutionSensitiveHousehold: Boolean(body.pollutionSensitiveHousehold),
-    });
-
-    res.json(result);
+    res.json(calculateCommuteImpact(validated));
   });
 
   // 6. Demo Community dataset (login-free simulated community data)

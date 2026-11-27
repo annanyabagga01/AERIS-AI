@@ -161,7 +161,7 @@ export function SettingsPage({
   const [savedNotice, setSavedNotice] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
 
-  // Ephemeral location detection state (NEVER persisted to storage or Firestore)
+  // Ephemeral location detection state (NEVER persisted to browser storage or backend)
   const [locationState, setLocationState] = useState<LocationUiState>('idle');
   const [detectionMethod, setDetectionMethod] =
     useState<LocationDetectionMethod>('manual_selection');
@@ -553,7 +553,7 @@ export function SettingsPage({
             <p className="text-xs text-slate-400 mt-1">
               City name and household settings are stored locally in your browser.
               AERIS AI never stores GPS coordinates, precise location, or medical
-              diagnoses in localStorage or Firestore.
+              diagnoses in localStorage or on any remote database.
             </p>
           </div>
 
@@ -812,8 +812,8 @@ export function SettingsPage({
                 <ShieldCheck className="w-3.5 h-3.5 text-emerald-400 shrink-0 mt-0.5" />
                 <span>
                   Zero GPS stored: coordinates are used transiently in memory only
-                  when browser geolocation succeeds, never saved to Firebase,
-                  Firestore, or browser storage. {SIMULATION_DISCLAIMER_TEXT}
+                  when browser geolocation succeeds, never saved to any remote
+                  database or browser storage. {SIMULATION_DISCLAIMER_TEXT}
                 </span>
               </p>
             </div>

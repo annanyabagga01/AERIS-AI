@@ -71,9 +71,9 @@ export function RoutinePlannerPage({
       isLiveVerified: false,
       isStale: false,
       isMissing: aqi === null,
-      isDemo: false,
+      isDemo: true,
       verificationNotice:
-        'Current live CPCB verification context unavailable; outdoor windows remain conservative.',
+        'Simulated demonstration air quality data is loading; outdoor activity guidance remains conservative.',
     };
   }, [aqiData, aqi]);
 

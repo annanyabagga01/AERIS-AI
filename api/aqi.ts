@@ -1,4 +1,6 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import { sendJson } from '../server/http.ts';
+import { redactSecrets } from '../server/security.ts';
 import { classifyCpcbAqi, INDIAN_CITIES } from '../src/lib/aqi.ts';
 import {
   buildSimulatedCityAqiResponse,
@@ -6,13 +8,6 @@ import {
   SIMULATION_DATA_SOURCE,
   SIMULATION_DATA_TYPE,
 } from '../src/lib/indiaSimulation.ts';
-
-function sendJson(res: ServerResponse, statusCode: number, body: unknown): void {
-  res.statusCode = statusCode;
-  res.setHeader('Content-Type', 'application/json; charset=utf-8');
-  res.setHeader('Cache-Control', 'no-store');
-  res.end(JSON.stringify(body));
-}
 
 export default function handler(
   req: IncomingMessage,
@@ -60,10 +55,11 @@ export default function handler(
   } catch (err) {
     sendJson(res, 500, {
       success: false,
-      error:
+      error: redactSecrets(
         err instanceof Error
           ? err.message
-          : 'Unable to retrieve simulated air quality data.',
+          : 'Unable to retrieve simulated air quality data.'
+      ),
     });
   }
 }

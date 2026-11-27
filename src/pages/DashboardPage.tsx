@@ -680,8 +680,17 @@ export function DashboardPage({
                       return (
                         <tr
                           key={row.state_code}
+                          tabIndex={0}
+                          role="button"
+                          aria-label={`Select ${row.representativeCity}, ${row.state} (Average AQI ${row.averageAqi}, ${row.category})`}
                           onClick={() => onCityChange(row.representativeCity)}
-                          className="cursor-pointer hover:bg-slate-800/50 transition-colors"
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter' || e.key === ' ') {
+                              e.preventDefault();
+                              onCityChange(row.representativeCity);
+                            }
+                          }}
+                          className="cursor-pointer hover:bg-slate-800/50 focus-visible:outline-none focus-visible:bg-cyan-500/15 transition-colors"
                         >
                           <td className="py-2 px-3 font-medium text-slate-100 whitespace-nowrap">
                             {row.state}{' '}

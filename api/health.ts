@@ -1,5 +1,6 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { isGeminiConfigured } from '../server/ai/gemini.ts';
+import { sendJson } from '../server/http.ts';
 import {
   getIndiaSimulatedSnapshot,
   resolveSimulationIntervalMs,
@@ -9,17 +10,18 @@ import {
   SIMULATION_DISCLAIMER_TEXT,
 } from '../src/lib/indiaSimulation.ts';
 
-function sendJson(res: ServerResponse, statusCode: number, body: unknown): void {
-  res.statusCode = statusCode;
-  res.setHeader('Content-Type', 'application/json; charset=utf-8');
-  res.setHeader('Cache-Control', 'no-store');
-  res.end(JSON.stringify(body));
-}
-
 export default function handler(
-  _req: IncomingMessage,
+  req: IncomingMessage,
   res: ServerResponse
 ): void {
+  if (req.method && req.method !== 'GET' && req.method !== 'HEAD') {
+    sendJson(res, 405, {
+      success: false,
+      error: `Method ${req.method} not allowed. Use GET /api/health.`,
+    });
+    return;
+  }
+
   const intervalMs = resolveSimulationIntervalMs(
     process.env.SIMULATION_INTERVAL_MS
   );

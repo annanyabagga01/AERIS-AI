@@ -341,8 +341,25 @@ function AerisShell() {
     }
   };
 
+  useEffect(() => {
+    if (!mobileMenuOpen) return;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setMobileMenuOpen(false);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [mobileMenuOpen]);
+
   return (
     <div className="min-h-screen aeris-grid-bg text-slate-100 flex">
+      <a
+        href="#main-content"
+        className="sr-only focus:not-sr-only focus:fixed focus:top-3 focus:left-3 focus:z-[100] focus:px-4 focus:py-2 focus:rounded-lg focus:bg-cyan-400 focus:text-slate-950 focus:font-semibold focus:text-sm focus:shadow-lg"
+      >
+        Skip to main content
+      </a>
       {/* Desktop Sidebar */}
       <aside className="hidden lg:flex lg:flex-col lg:w-68 lg:shrink-0 border-r border-slate-800/80 bg-[#050916]/95 sticky top-0 h-screen">
         <div className="px-5 py-5 border-b border-slate-800/80 flex items-center gap-3">
@@ -372,7 +389,7 @@ function AerisShell() {
             const items = NAV_ITEMS.filter((i) => i.group === group);
             return (
               <div key={group} className="space-y-1">
-                <p className="px-3 pb-1 text-[11px] font-medium text-slate-500">
+                <p className="px-3 pb-1 text-[11px] font-medium text-slate-400">
                   {group}
                 </p>
                 {items.map((item) => {
@@ -459,6 +476,9 @@ function AerisShell() {
               onClick={() => setMobileMenuOpen(false)}
             />
             <motion.aside
+              role="dialog"
+              aria-modal="true"
+              aria-label="Mobile navigation menu"
               initial={{ x: '-100%' }}
               animate={{ x: 0 }}
               exit={{ x: '-100%' }}
@@ -552,7 +572,11 @@ function AerisShell() {
         </header>
 
         {/* Active Page Canvas */}
-        <main className="flex-1 px-4 sm:px-6 lg:px-8 py-6 pb-20 lg:pb-8 max-w-[1340px] w-full mx-auto">
+        <main
+          id="main-content"
+          tabIndex={-1}
+          className="flex-1 px-4 sm:px-6 lg:px-8 py-6 pb-20 lg:pb-8 max-w-[1340px] w-full mx-auto focus:outline-none"
+        >
           <AnimatePresence mode="wait">
             <motion.div
               key={activeNav}
